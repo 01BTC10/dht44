@@ -850,14 +850,45 @@ periodic_save_nodes(void)
     state_save_nodes(nodes, n);
 }
 
+/*
+ * Re-push a stored item to the network. Used by the periodic republish timer
+ * AND once shortly after daemon startup. Without this the value lives only on
+ * the peers the original put hit; over time those peers drop it (~2 h cap) and
+ * a restarted daemon's lookup converges to a different set of peers that
+ * never received it. Re-publishing tells the CURRENT closest 8 peers about
+ * it, which is what subsequent gets will then converge to.
+ */
 static int
 republish_one(const uint8_t target[BEP44_TARGET_LEN], void *closure)
 {
     (void)closure;
-    fprintf(stderr, "[dht44:daemon] republish target ");
-    for (size_t i = 0; i < 4; i++) fprintf(stderr, "%02x", target[i]);
-    fputs("...\n", stderr);
-    /* TODO: actually re-issue the put. For v1 we just log. */
+    stored_item si = {0};
+    if (state_load_item(target, &si) < 0) return 0;     /* skip on read error */
+
+    put_ctx *p = put_ctx_alloc();
+    if (!p) return 0;
+    p->client_idx = -1;     /* no IPC client to respond to */
+    p->mutable_ = si.mutable_;
+    memcpy(p->target, target, BEP44_TARGET_LEN);
+    if (si.mutable_) {
+        memcpy(p->pk, si.pk, BEP44_PK_LEN);
+        memcpy(p->sig, si.sig, BEP44_SIG_LEN);
+        p->seq = si.seq;
+        if (si.salt_len) {
+            memcpy(p->salt, si.salt, si.salt_len);
+            p->salt_len = si.salt_len;
+        }
+    }
+    memcpy(p->v_bencoded, si.v, si.v_len);
+    p->v_len = si.v_len;
+
+    char hex[17]; hex8(hex, target);
+    fprintf(stderr, "[dht44:daemon] republish target=%s.. (mutable=%d)\n",
+            hex, si.mutable_);
+
+    if (lookup_start(p->target, 15000, on_put_lookup_done, p) == NULL) {
+        put_ctx_release(p);
+    }
     return 0;
 }
 
@@ -934,7 +965,11 @@ cmd_daemon(int argc, char **argv)
             (unsigned)g_args.port);
 
     time_t next_save     = time(NULL) + 5 * 60;
-    time_t next_republish = time(NULL) + (time_t)g_args.republish_min * 60;
+    /* First republish runs ~60 s after boot so a restarted daemon re-pushes
+     * stored items to the current closest peers as soon as the routing table
+     * is populated enough. After that, normal cadence (--republish minutes). */
+    time_t next_republish = time(NULL) + 60;
+    int    initial_republish_done = 0;
     time_t next_upnp     = time(NULL) + 30 * 60;
     time_t next_status   = time(NULL) + 30;
     time_t next_bootstrap_retry = time(NULL) + 2;
@@ -1056,9 +1091,11 @@ cmd_daemon(int argc, char **argv)
             periodic_save_nodes(); next_save = now + 5 * 60;
         }
         if (now >= next_republish) {
-            fprintf(stderr, "[dht44:daemon] republish tick\n");
+            fprintf(stderr, "[dht44:daemon] republish tick%s\n",
+                    initial_republish_done ? "" : " (initial post-boot)");
             periodic_republish();
             next_republish = now + (time_t)g_args.republish_min * 60;
+            initial_republish_done = 1;
         }
         if (now >= next_upnp) {
             if (!g_args.no_upnp) {

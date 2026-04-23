@@ -14,6 +14,7 @@
 
 #include "lookup.h"
 
+#include <arpa/inet.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -23,6 +24,14 @@
 #include "bencode.h"
 #include "bep44.h"
 #include "dht_wrap.h"
+
+static int lookup_verbose(void) {
+    static int v = -1;
+    if (v < 0) v = getenv("DHT44_LOOKUP_DEBUG") ? 1 : 0;
+    return v;
+}
+
+#define LDBG(...) do { if (lookup_verbose()) fprintf(stderr, __VA_ARGS__); } while (0)
 
 #define COMPACT_NODE_LEN 26   /* 20 id + 4 ip + 2 port */
 
@@ -171,6 +180,21 @@ finish(lookup_run *L)
 {
     if (L->completed) return;
     L->completed = 1;
+    if (lookup_verbose()) {
+        int responded = 0, failed = 0, fresh = 0, inflight = 0;
+        for (int i = 0; i < L->shortlist_count; i++) {
+            switch (L->shortlist[i].state) {
+                case NODE_RESPONDED: responded++; break;
+                case NODE_FAILED:    failed++;    break;
+                case NODE_FRESH:     fresh++;     break;
+                case NODE_INFLIGHT:  inflight++;  break;
+            }
+        }
+        LDBG("[lookup] FINISH shortlist=%d (responded=%d failed=%d "
+             "fresh=%d inflight=%d) values=%d tokens=%d\n",
+             L->shortlist_count, responded, failed, fresh, inflight,
+             L->values_count, L->tokens_count);
+    }
     if (L->cb) {
         L->cb(0,
               L->values, (size_t)L->values_count,
@@ -266,6 +290,13 @@ send_to(lookup_run *L, int node_idx)
     }
     n->state = NODE_INFLIGHT;
     L->in_flight++;
+
+    if (lookup_verbose()) {
+        char ip[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &n->peer.sin_addr, ip, sizeof(ip));
+        LDBG("[lookup] -> get to %s:%u (idx=%d, has_id=%d)\n",
+             ip, ntohs(n->peer.sin_port), node_idx, n->has_id);
+    }
 }
 
 static void
@@ -396,13 +427,37 @@ on_tx(bep44_tx_event ev,
         }
 
         const bencode_value *nodes = bencode_dict_get(r, "nodes");
+        size_t added = 0;
         if (nodes && nodes->type == BENCODE_STR) {
+            int before = L->shortlist_count;
             ingest_compact_nodes(L, nodes->str.bytes, nodes->str.len);
+            added = (size_t)(L->shortlist_count - before);
         }
 
         const bencode_value *token = bencode_dict_get(r, "token");
         record_token(L, peer, token);
         ingest_value(L, peer, r);
+
+        if (lookup_verbose()) {
+            const struct sockaddr_in *p4 = (const struct sockaddr_in *)peer;
+            char ip[INET_ADDRSTRLEN];
+            inet_ntop(AF_INET, &p4->sin_addr, ip, sizeof(ip));
+            const bencode_value *v = bencode_dict_get(r, "v");
+            LDBG("[lookup] <- reply %s:%u: nodes_added=%zu has_token=%d "
+                 "has_v=%d shortlist=%d values=%d\n",
+                 ip, ntohs(p4->sin_port), added,
+                 token && token->type == BENCODE_STR ? 1 : 0,
+                 v ? 1 : 0,
+                 L->shortlist_count, L->values_count);
+        }
+    } else if (lookup_verbose()) {
+        const struct sockaddr_in *p4 = (const struct sockaddr_in *)peer;
+        char ip[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &p4->sin_addr, ip, sizeof(ip));
+        LDBG("[lookup] <- %s from %s:%u\n",
+             ev == BEP44_TX_TIMEOUT ? "timeout" :
+             ev == BEP44_TX_ERROR   ? "error"   : "??",
+             ip, ntohs(p4->sin_port));
     }
 
     if (top_k_done(L)) {
@@ -444,6 +499,15 @@ lookup_start(const uint8_t target[BEP44_TARGET_LEN],
     int n = dht_wrap_get_nodes(seed, LOOKUP_TOP_K);
     for (int i = 0; i < n; i++) {
         shortlist_insert(L, NULL, &seed[i]);
+    }
+    if (lookup_verbose()) {
+        char hex[BEP44_TARGET_LEN * 2 + 1];
+        static const char *d = "0123456789abcdef";
+        for (size_t i = 0; i < BEP44_TARGET_LEN; i++) {
+            hex[i*2] = d[target[i] >> 4]; hex[i*2+1] = d[target[i] & 0xf];
+        }
+        hex[BEP44_TARGET_LEN*2] = 0;
+        LDBG("[lookup] START target=%s seeded=%d\n", hex, n);
     }
     if (L->shortlist_count == 0) {
         /* nothing to query — finish immediately as a no-op */
