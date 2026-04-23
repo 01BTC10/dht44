@@ -456,7 +456,8 @@ dht_wrap_get_nodes(struct sockaddr_in *out, int max)
 {
     if (!s_initialised || max <= 0) return 0;
     int n = max;
-    if (dht_get_nodes(out, &n, NULL, NULL) < 0) return 0;
+    int n6 = 0;     /* jech writes *num6 unconditionally; pass dummy. */
+    if (dht_get_nodes(out, &n, NULL, &n6) < 0) return 0;
     return n;
 }
 
