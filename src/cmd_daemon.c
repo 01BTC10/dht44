@@ -199,43 +199,8 @@ token_matches(const uint8_t *got, size_t got_len,
     return sodium_memcmp(got, want, TOKEN_LEN) == 0;
 }
 
-/* ============================================================
- * Item blob helpers
- * Format: seq(8 BE) || salt_len(1) || salt || sig(64) || v_len(2 BE) || v_bencoded
- * ============================================================ */
-
-typedef struct {
-    int64_t       seq;
-    const uint8_t *salt;
-    size_t         salt_len;
-    const uint8_t *sig;
-    const uint8_t *v;
-    size_t         v_len;
-} item_view;
-
-static int
-parse_item(const uint8_t *bytes, size_t len, item_view *out)
-{
-    if (len < 8 + 1 + 64 + 2) return -1;
-    size_t pos = 0;
-    int64_t seq = 0;
-    for (int i = 0; i < 8; i++) seq = (seq << 8) | bytes[pos++];
-    out->seq = seq;
-    size_t salt_len = bytes[pos++];
-    if (salt_len > BEP44_MAX_SALT || salt_len + 64 + 2 > len - pos) return -1;
-    out->salt = salt_len ? bytes + pos : NULL;
-    out->salt_len = salt_len;
-    pos += salt_len;
-    out->sig = bytes + pos;
-    pos += 64;
-    if (pos + 2 > len) return -1;
-    size_t v_len = ((size_t)bytes[pos] << 8) | bytes[pos + 1];
-    pos += 2;
-    if (v_len > BEP44_MAX_V || pos + v_len != len) return -1;
-    out->v = bytes + pos;
-    out->v_len = v_len;
-    return 0;
-}
+/* Items are persisted via state_save_item / state_load_item using the
+ * stored_item struct. Format on disk is JSON (see state.h). */
 
 /* ============================================================
  * IPC plumbing
@@ -571,10 +536,13 @@ static void
 op_put(int client_idx, const bencode_value *req)
 {
     const bencode_value *target = bencode_dict_get(req, "target");
-    const bencode_value *item   = bencode_dict_get(req, "item");
     const bencode_value *vbenc  = bencode_dict_get(req, "v");
     const bencode_value *mut    = bencode_dict_get(req, "mutable");
     const bencode_value *cas    = bencode_dict_get(req, "cas");
+    const bencode_value *k      = bencode_dict_get(req, "k");
+    const bencode_value *salt   = bencode_dict_get(req, "salt");
+    const bencode_value *seq    = bencode_dict_get(req, "seq");
+    const bencode_value *sig    = bencode_dict_get(req, "sig");
 
     int is_mutable = (mut && mut->type == BENCODE_INT && mut->i != 0);
 
@@ -587,66 +555,57 @@ op_put(int client_idx, const bencode_value *req)
     p->client_idx = client_idx;
     p->mutable_ = is_mutable;
 
+    if (!vbenc || vbenc->type != BENCODE_STR
+        || vbenc->str.len > sizeof(p->v_bencoded)) {
+        send_ipc_error(g_clients[client_idx], "missing/oversize v");
+        put_ctx_release(p); client_close(client_idx); return;
+    }
+    memcpy(p->v_bencoded, vbenc->str.bytes, vbenc->str.len);
+    p->v_len = vbenc->str.len;
+
     if (is_mutable) {
         if (!target || target->type != BENCODE_STR
             || target->str.len != BEP44_TARGET_LEN
-            || !item || item->type != BENCODE_STR) {
-            send_ipc_error(g_clients[client_idx], "missing target/item for put_mutable");
-            put_ctx_release(p);
-            client_close(client_idx);
-            return;
+            || !k || k->type != BENCODE_STR || k->str.len != BEP44_PK_LEN
+            || !seq || seq->type != BENCODE_INT
+            || !sig || sig->type != BENCODE_STR || sig->str.len != BEP44_SIG_LEN) {
+            send_ipc_error(g_clients[client_idx],
+                           "put_mutable needs target,k,seq,sig,v");
+            put_ctx_release(p); client_close(client_idx); return;
         }
         memcpy(p->target, target->str.bytes, BEP44_TARGET_LEN);
-
-        item_view iv;
-        if (parse_item(item->str.bytes, item->str.len, &iv) < 0) {
-            send_ipc_error(g_clients[client_idx], "malformed item blob");
-            put_ctx_release(p);
-            client_close(client_idx);
-            return;
-        }
-        p->seq = iv.seq;
-        memcpy(p->sig, iv.sig, BEP44_SIG_LEN);
-        if (iv.salt_len) {
-            memcpy(p->salt, iv.salt, iv.salt_len);
-            p->salt_len = iv.salt_len;
-        }
-        if (iv.v_len > sizeof(p->v_bencoded)) {
-            send_ipc_error(g_clients[client_idx], "v too large");
-            put_ctx_release(p);
-            client_close(client_idx);
-            return;
-        }
-        memcpy(p->v_bencoded, iv.v, iv.v_len);
-        p->v_len = iv.v_len;
-
-        /* pubkey: from a separate field "k" in the request */
-        const bencode_value *k = bencode_dict_get(req, "k");
-        if (!k || k->type != BENCODE_STR || k->str.len != BEP44_PK_LEN) {
-            send_ipc_error(g_clients[client_idx], "missing k for put_mutable");
-            put_ctx_release(p);
-            client_close(client_idx);
-            return;
-        }
         memcpy(p->pk, k->str.bytes, BEP44_PK_LEN);
-
+        memcpy(p->sig, sig->str.bytes, BEP44_SIG_LEN);
+        p->seq = seq->i;
+        if (salt && salt->type == BENCODE_STR && salt->str.len > 0) {
+            if (salt->str.len > BEP44_MAX_SALT) {
+                send_ipc_error(g_clients[client_idx], "salt too large");
+                put_ctx_release(p); client_close(client_idx); return;
+            }
+            memcpy(p->salt, salt->str.bytes, salt->str.len);
+            p->salt_len = salt->str.len;
+        }
         if (cas && cas->type == BENCODE_INT) {
             p->has_cas = 1;
             p->cas = cas->i;
         }
-        /* persist for republish */
-        state_save_item(p->target, item->str.bytes, item->str.len);
+
+        stored_item si = {0};
+        si.mutable_ = 1;
+        memcpy(si.pk, p->pk, BEP44_PK_LEN);
+        si.seq = p->seq;
+        if (p->salt_len) { memcpy(si.salt, p->salt, p->salt_len); si.salt_len = p->salt_len; }
+        memcpy(si.sig, p->sig, BEP44_SIG_LEN);
+        memcpy(si.v, p->v_bencoded, p->v_len);
+        si.v_len = p->v_len;
+        state_save_item(p->target, &si);
     } else {
-        if (!vbenc || vbenc->type != BENCODE_STR
-            || vbenc->str.len > sizeof(p->v_bencoded)) {
-            send_ipc_error(g_clients[client_idx], "missing v for put_immutable");
-            put_ctx_release(p);
-            client_close(client_idx);
-            return;
-        }
-        memcpy(p->v_bencoded, vbenc->str.bytes, vbenc->str.len);
-        p->v_len = vbenc->str.len;
         bep44_immutable_target(p->target, p->v_bencoded, p->v_len);
+        stored_item si = {0};
+        si.mutable_ = 0;
+        memcpy(si.v, p->v_bencoded, p->v_len);
+        si.v_len = p->v_len;
+        state_save_item(p->target, &si);
     }
 
     if (lookup_start(p->target, 15000, on_put_lookup_done, p) == NULL) {
@@ -749,39 +708,37 @@ on_inbound_query(const struct sockaddr *peer, int peerlen,
         fprintf(stderr, "[dht44:daemon] <- get from %s target=%s..\n", addr, hex);
         g_q_in_get++;
 
-        uint8_t blob[2048];
-        size_t blob_len = 0;
-        int have = state_load_item(target, blob, sizeof(blob), &blob_len) == 0;
+        stored_item si = {0};
+        int have = state_load_item(target, &si) == 0;
 
         uint8_t token[TOKEN_LEN];
         issue_token(token, p4, target);
 
         uint8_t out[2048];
         ssize_t n;
-        if (have) {
-            item_view iv;
-            if (parse_item(blob, blob_len, &iv) == 0 && iv.salt_len == 0) {
-                /* immutable response (no k/sig/seq/salt) */
-                n = bep44_build_get_response_immutable(
-                    out, sizeof(out), tid, tid_len,
-                    dht_wrap_node_id(), NULL, 0,
-                    token, sizeof(token),
-                    iv.v, iv.v_len);
-            } else if (parse_item(blob, blob_len, &iv) == 0) {
-                /* mutable: we don't store pk in the blob. Skip for v1
-                 * (peer will get our id only). TODO: extend item format. */
-                n = bep44_build_put_response(out, sizeof(out), tid, tid_len,
-                                             dht_wrap_node_id());
-            } else {
-                n = bep44_build_put_response(out, sizeof(out), tid, tid_len,
-                                             dht_wrap_node_id());
-            }
+        if (have && si.mutable_) {
+            n = bep44_build_get_response_mutable(
+                out, sizeof(out), tid, tid_len,
+                dht_wrap_node_id(), si.pk,
+                NULL, 0,                          /* nodes (none for now) */
+                si.seq, si.sig,
+                token, sizeof(token),
+                si.v, si.v_len);
+        } else if (have) {
+            n = bep44_build_get_response_immutable(
+                out, sizeof(out), tid, tid_len,
+                dht_wrap_node_id(), NULL, 0,
+                token, sizeof(token),
+                si.v, si.v_len);
         } else {
             /* no data — respond with id only, BEP 5 style */
             n = bep44_build_put_response(out, sizeof(out), tid, tid_len,
                                          dht_wrap_node_id());
         }
-        if (n > 0) dht_wrap_sendto(peer, peerlen, out, (size_t)n);
+        if (n > 0) {
+            dht_wrap_sendto(peer, peerlen, out, (size_t)n);
+            g_pkts_out++;
+        }
         return;
     }
 

@@ -54,16 +54,40 @@ int state_save_nodes(const struct sockaddr_in *nodes, int count);
 int state_load_nodes(struct sockaddr_in *out, int max, int *count_out);
 
 /*
- * Items the daemon should republish. The bytes blob is the format documented
- * in CLAUDE.md: seq(8 BE) || salt_len(1) || salt || sig(64) || v_len(2 BE) || v.
- * Save is atomic via write-then-rename.
+ * Items the daemon stores for republish + inbound serve.
+ *
+ * On disk: $DHT44_HOME/items/<40-hex-target>.json — human-readable JSON.
+ * Binary fields (pk, sig, salt, v) are hex-encoded inside the JSON.
+ *
+ * Mutable example:
+ *   { "mutable": true,
+ *     "pk":  "<64-hex>",
+ *     "seq": 5,
+ *     "salt":"<2*saltlen-hex>",       (omitted when salt_len == 0)
+ *     "sig": "<128-hex>",
+ *     "v":   "<2*vlen-hex>" }
+ *
+ * Immutable example:
+ *   { "mutable": false,
+ *     "v":   "<2*vlen-hex>" }
  */
-int state_save_item(const uint8_t target[BEP44_TARGET_LEN],
-                    const uint8_t *bytes, size_t len);
-int state_load_item(const uint8_t target[BEP44_TARGET_LEN],
-                    uint8_t *out, size_t cap, size_t *len_out);
+typedef struct {
+    int      mutable_;
+    uint8_t  pk[BEP44_PK_LEN];
+    int64_t  seq;
+    uint8_t  salt[BEP44_MAX_SALT];
+    size_t   salt_len;
+    uint8_t  sig[BEP44_SIG_LEN];
+    uint8_t  v[BEP44_MAX_V];
+    size_t   v_len;
+} stored_item;
 
-/* Iterate items/<target>.bin files. cb returns non-zero to stop early. */
+int state_save_item(const uint8_t target[BEP44_TARGET_LEN],
+                    const stored_item *item);
+int state_load_item(const uint8_t target[BEP44_TARGET_LEN],
+                    stored_item *out);
+
+/* Iterate items/<target>.json files. cb returns non-zero to stop early. */
 typedef int (*state_item_cb)(const uint8_t target[BEP44_TARGET_LEN], void *closure);
 int state_walk_items(state_item_cb cb, void *closure);
 

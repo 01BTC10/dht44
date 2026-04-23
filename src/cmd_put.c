@@ -237,33 +237,25 @@ cmd_put(int argc, char **argv)
     uint8_t target[BEP44_TARGET_LEN];
     bep44_target(target, pk, (const uint8_t *)salt, salt_len);
 
-    /* assemble item blob: seq(8) || salt_len(1) || salt || sig(64) || v_len(2) || v */
-    size_t item_cap = 8 + 1 + salt_len + 64 + 2 + v_len;
-    uint8_t *item = malloc(item_cap);
-    if (!item) return 2;
-    size_t off = 0;
-    for (int i = 7; i >= 0; i--) item[off++] = (uint8_t)((uint64_t)seq >> (i * 8));
-    item[off++] = (uint8_t)salt_len;
-    if (salt_len) { memcpy(item + off, salt, salt_len); off += salt_len; }
-    memcpy(item + off, sig, 64); off += 64;
-    item[off++] = (uint8_t)(v_len >> 8);
-    item[off++] = (uint8_t)v_len;
-    memcpy(item + off, v, v_len); off += v_len;
-
-    /* IPC request: { cas?, item, k, mutable:1, op:"put", target } */
+    /* IPC request keys (alphabetical): cas?, k, mutable:1, op:"put",
+     * salt?, seq, sig, target, v */
     uint8_t req[BEP44_MAX_V + 1024];
     bencode_writer w;
     bencode_writer_init(&w, req, sizeof(req));
     bencode_dict_open(&w);
         if (has_cas) { bencode_cstr(&w, "cas"); bencode_int(&w, cas); }
-        bencode_cstr(&w, "item");    bencode_str(&w, item, off);
         bencode_cstr(&w, "k");       bencode_str(&w, pk, BEP44_PK_LEN);
         bencode_cstr(&w, "mutable"); bencode_int(&w, 1);
         bencode_cstr(&w, "op");      bencode_cstr(&w, "put");
+        if (salt_len > 0) {
+            bencode_cstr(&w, "salt"); bencode_str(&w, salt, salt_len);
+        }
+        bencode_cstr(&w, "seq");     bencode_int(&w, seq);
+        bencode_cstr(&w, "sig");     bencode_str(&w, sig, BEP44_SIG_LEN);
         bencode_cstr(&w, "target");  bencode_str(&w, target, BEP44_TARGET_LEN);
+        bencode_cstr(&w, "v");       bencode_str(&w, v, v_len);
     bencode_dict_close(&w);
     ssize_t rn = bencode_writer_finish(&w);
-    free(item);
     if (rn < 0) {
         fprintf(stderr, "[dht44:cmd_put] request too large\n");
         return 1;

@@ -14,6 +14,8 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+#include <jansson.h>
+
 /* PATH_MAX isn't reliably defined under -std=c11 without feature test macros.
  * 4096 covers Linux's PATH_MAX; all our paths are short suffixes of $DHT44_HOME. */
 #define PATH_MAX 4096
@@ -325,30 +327,154 @@ item_path(char *out, size_t cap, const uint8_t target[BEP44_TARGET_LEN])
     if (state_home(home, sizeof(home)) < 0) return -1;
     char hex[BEP44_TARGET_LEN * 2 + 1];
     target_to_hex(hex, target);
-    int n = snprintf(out, cap, "%s/items/%s.bin", home, hex);
+    int n = snprintf(out, cap, "%s/items/%s.json", home, hex);
     return (n < 0 || (size_t)n >= cap) ? -1 : 0;
 }
 
-int
-state_save_item(const uint8_t target[BEP44_TARGET_LEN],
-                const uint8_t *bytes, size_t len)
+/* Generic hex helpers — bytes <-> alloc'd C string. */
+static char *
+bytes_to_hexstr(const uint8_t *bytes, size_t len)
 {
-    if (state_ensure_dir() < 0) return -1;
-    char path[PATH_MAX];
-    if (item_path(path, sizeof(path), target) < 0) return -1;
-    return write_atomic(path, bytes, len, 0600);
+    static const char *d = "0123456789abcdef";
+    char *out = malloc(len * 2 + 1);
+    if (!out) return NULL;
+    for (size_t i = 0; i < len; i++) {
+        out[i * 2]     = d[bytes[i] >> 4];
+        out[i * 2 + 1] = d[bytes[i] & 0xf];
+    }
+    out[len * 2] = '\0';
+    return out;
+}
+
+static int
+hexstr_to_bytes(const char *hex, uint8_t *out, size_t expected_len)
+{
+    if (!hex) return -1;
+    if (strlen(hex) != expected_len * 2) return -1;
+    for (size_t i = 0; i < expected_len; i++) {
+        char hi = hex[i * 2], lo = hex[i * 2 + 1];
+        if (!isxdigit((unsigned char)hi) || !isxdigit((unsigned char)lo)) return -1;
+        char b[3] = { hi, lo, '\0' };
+        out[i] = (uint8_t)strtoul(b, NULL, 16);
+    }
+    return 0;
 }
 
 int
-state_load_item(const uint8_t target[BEP44_TARGET_LEN],
-                uint8_t *out, size_t cap, size_t *len_out)
+state_save_item(const uint8_t target[BEP44_TARGET_LEN], const stored_item *item)
 {
+    if (!item) return -1;
+    if (state_ensure_dir() < 0) return -1;
     char path[PATH_MAX];
     if (item_path(path, sizeof(path), target) < 0) return -1;
-    ssize_t n = read_all(path, out, cap);
+
+    json_t *root = json_object();
+    if (!root) return -1;
+
+    json_object_set_new(root, "mutable",
+                        item->mutable_ ? json_true() : json_false());
+
+    char *v_hex = bytes_to_hexstr(item->v, item->v_len);
+    if (!v_hex) { json_decref(root); return -1; }
+
+    if (item->mutable_) {
+        char *pk_hex  = bytes_to_hexstr(item->pk,  BEP44_PK_LEN);
+        char *sig_hex = bytes_to_hexstr(item->sig, BEP44_SIG_LEN);
+        if (!pk_hex || !sig_hex) {
+            free(pk_hex); free(sig_hex); free(v_hex);
+            json_decref(root);
+            return -1;
+        }
+        json_object_set_new(root, "pk",  json_string(pk_hex));
+        json_object_set_new(root, "seq", json_integer(item->seq));
+        if (item->salt_len > 0) {
+            char *salt_hex = bytes_to_hexstr(item->salt, item->salt_len);
+            if (!salt_hex) {
+                free(pk_hex); free(sig_hex); free(v_hex);
+                json_decref(root);
+                return -1;
+            }
+            json_object_set_new(root, "salt", json_string(salt_hex));
+            free(salt_hex);
+        }
+        json_object_set_new(root, "sig", json_string(sig_hex));
+        free(pk_hex);
+        free(sig_hex);
+    }
+    json_object_set_new(root, "v", json_string(v_hex));
+    free(v_hex);
+
+    char *txt = json_dumps(root, JSON_INDENT(2) | JSON_SORT_KEYS);
+    json_decref(root);
+    if (!txt) return -1;
+    int rc = write_atomic(path, txt, strlen(txt), 0600);
+    free(txt);
+    return rc;
+}
+
+int
+state_load_item(const uint8_t target[BEP44_TARGET_LEN], stored_item *out)
+{
+    if (!out) return -1;
+    char path[PATH_MAX];
+    if (item_path(path, sizeof(path), target) < 0) return -1;
+
+    /* read entire file (cap at 8 KiB — items are at most ~2 KiB) */
+    uint8_t buf[8192];
+    ssize_t n = read_all(path, buf, sizeof(buf) - 1);
     if (n < 0) return -1;
-    *len_out = (size_t)n;
+    buf[n] = 0;
+
+    json_error_t err;
+    json_t *root = json_loads((const char *)buf, 0, &err);
+    if (!root) {
+        fprintf(stderr, "[dht44:state] json parse %s: %s\n", path, err.text);
+        return -1;
+    }
+
+    memset(out, 0, sizeof(*out));
+    json_t *jmut = json_object_get(root, "mutable");
+    out->mutable_ = jmut && json_is_true(jmut) ? 1 : 0;
+
+    json_t *jv = json_object_get(root, "v");
+    if (!jv || !json_is_string(jv)) goto bad;
+    {
+        const char *vhex = json_string_value(jv);
+        size_t vlen = strlen(vhex) / 2;
+        if (vlen > BEP44_MAX_V || hexstr_to_bytes(vhex, out->v, vlen) < 0) goto bad;
+        out->v_len = vlen;
+    }
+
+    if (out->mutable_) {
+        json_t *jpk  = json_object_get(root, "pk");
+        json_t *jseq = json_object_get(root, "seq");
+        json_t *jsig = json_object_get(root, "sig");
+        json_t *jsalt = json_object_get(root, "salt");
+        if (!jpk || !json_is_string(jpk)
+            || hexstr_to_bytes(json_string_value(jpk), out->pk, BEP44_PK_LEN) < 0)
+            goto bad;
+        if (!jseq || !json_is_integer(jseq)) goto bad;
+        out->seq = json_integer_value(jseq);
+        if (!jsig || !json_is_string(jsig)
+            || hexstr_to_bytes(json_string_value(jsig), out->sig, BEP44_SIG_LEN) < 0)
+            goto bad;
+        if (jsalt && json_is_string(jsalt)) {
+            const char *shex = json_string_value(jsalt);
+            size_t slen = strlen(shex) / 2;
+            if (slen > BEP44_MAX_SALT
+                || hexstr_to_bytes(shex, out->salt, slen) < 0)
+                goto bad;
+            out->salt_len = slen;
+        }
+    }
+
+    json_decref(root);
     return 0;
+
+bad:
+    fprintf(stderr, "[dht44:state] %s: malformed item json\n", path);
+    json_decref(root);
+    return -1;
 }
 
 int
@@ -369,8 +495,8 @@ state_walk_items(state_item_cb cb, void *closure)
     while ((e = readdir(d))) {
         const char *name = e->d_name;
         size_t nl = strlen(name);
-        if (nl != BEP44_TARGET_LEN * 2 + 4) continue;       /* "<40hex>.bin" */
-        if (memcmp(name + BEP44_TARGET_LEN * 2, ".bin", 4) != 0) continue;
+        if (nl != BEP44_TARGET_LEN * 2 + 5) continue;       /* "<40hex>.json" */
+        if (memcmp(name + BEP44_TARGET_LEN * 2, ".json", 5) != 0) continue;
         char hex[BEP44_TARGET_LEN * 2 + 1];
         memcpy(hex, name, BEP44_TARGET_LEN * 2);
         hex[BEP44_TARGET_LEN * 2] = '\0';

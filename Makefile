@@ -1,7 +1,7 @@
 CC      ?= cc
 CFLAGS  ?= -O2 -Wall -Wextra -std=c11
 CFLAGS  += -Isrc -Ivendor/jech-dht
-LDFLAGS ?= -lsodium -lcrypto -lminiupnpc
+LDFLAGS ?= -lsodium -lcrypto -lminiupnpc -ljansson
 
 SRC := $(wildcard src/*.c) vendor/jech-dht/dht.c
 OBJ := $(SRC:.c=.o)

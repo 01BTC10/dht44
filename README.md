@@ -25,7 +25,7 @@ hello
 ## Build (Arch Linux)
 
 ```sh
-sudo pacman -S libsodium openssl miniupnpc
+sudo pacman -S libsodium openssl miniupnpc jansson
 git clone --recurse-submodules ssh://git@ds1621.tail7aed4e.ts.net:4022/r2d2/bep44_dht.git
 cd bep44_dht
 make
@@ -59,7 +59,7 @@ Exit codes: `0` success, `1` usage, `2` network/timeout, `3` crypto verify failu
 - `key.bin` — Ed25519 secret key, mode 0600.
 - `node_id.bin` — 20 B persistent DHT node ID.
 - `nodes.bin` — compact node list for warm start.
-- `items/<hex-target>.bin` — daemon's republish queue.
+- `items/<hex-target>.json` — daemon's republish + serve queue (human-readable).
 - `sock` — IPC UNIX socket (daemon-owned).
 - `lock` — `flock`-based daemon mutex.
 

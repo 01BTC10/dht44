@@ -148,18 +148,47 @@ walk_cb(const uint8_t target[BEP44_TARGET_LEN], void *closure)
 }
 
 static void
-test_items(void)
+test_items_immutable(void)
 {
     uint8_t target[BEP44_TARGET_LEN];
     for (int i = 0; i < BEP44_TARGET_LEN; i++) target[i] = (uint8_t)(0x10 + i);
-    const uint8_t blob[] = "item-payload-bytes";
-    EXPECT(state_save_item(target, blob, sizeof(blob)) == 0);
 
-    uint8_t buf[64];
-    size_t n = 0;
-    EXPECT(state_load_item(target, buf, sizeof(buf), &n) == 0);
-    EXPECT(n == sizeof(blob));
-    EXPECT(memcmp(buf, blob, sizeof(blob)) == 0);
+    stored_item si = {0};
+    si.mutable_ = 0;
+    memcpy(si.v, "5:hello", 7);
+    si.v_len = 7;
+    EXPECT(state_save_item(target, &si) == 0);
+
+    stored_item out = {0};
+    EXPECT(state_load_item(target, &out) == 0);
+    EXPECT(out.mutable_ == 0);
+    EXPECT(out.v_len == 7);
+    EXPECT(memcmp(out.v, "5:hello", 7) == 0);
+}
+
+static void
+test_items_mutable(void)
+{
+    uint8_t target[BEP44_TARGET_LEN];
+    for (int i = 0; i < BEP44_TARGET_LEN; i++) target[i] = (uint8_t)(0x20 + i);
+
+    stored_item si = {0};
+    si.mutable_ = 1;
+    memset(si.pk, 0xAA, BEP44_PK_LEN);
+    memset(si.sig, 0x55, BEP44_SIG_LEN);
+    si.seq = 42;
+    memcpy(si.salt, "foo", 3); si.salt_len = 3;
+    memcpy(si.v, "5:world", 7); si.v_len = 7;
+    EXPECT(state_save_item(target, &si) == 0);
+
+    stored_item out = {0};
+    EXPECT(state_load_item(target, &out) == 0);
+    EXPECT(out.mutable_ == 1);
+    EXPECT(memcmp(out.pk, si.pk, BEP44_PK_LEN) == 0);
+    EXPECT(memcmp(out.sig, si.sig, BEP44_SIG_LEN) == 0);
+    EXPECT(out.seq == 42);
+    EXPECT(out.salt_len == 3 && memcmp(out.salt, "foo", 3) == 0);
+    EXPECT(out.v_len == 7 && memcmp(out.v, "5:world", 7) == 0);
 
     struct walk_ctx ctx = { .seen = 0 };
     memcpy(ctx.expected, target, BEP44_TARGET_LEN);
@@ -178,7 +207,8 @@ main(void)
     test_keyfile();
     test_nodes_roundtrip();
     test_nodes_missing();
-    test_items();
+    test_items_immutable();
+    test_items_mutable();
 
     rm_rf(tmpdir);
     if (failures) {

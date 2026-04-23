@@ -24,9 +24,10 @@ libsodium, SHA-1 via OpenSSL EVP, NAT traversal via miniupnpc.
 - `libsodium` (Ed25519, CSPRNG)
 - `libssl` / `libcrypto` (SHA-1 via EVP, HMAC for token issuance)
 - `libminiupnpc` (UPnP IGD port mapping for the daemon)
+- `libjansson` (human-readable JSON for items on disk)
 - `jech/dht` — vendored at `vendor/jech-dht/` (git submodule)
 
-Install (Arch): `sudo pacman -S libsodium openssl miniupnpc`.
+Install (Arch): `sudo pacman -S libsodium openssl miniupnpc jansson`.
 
 ## Architecture: client/daemon split
 
@@ -134,8 +135,12 @@ bencoded bytes from stdin or file. Default: `--string`.
   routing table presence.
 - `nodes.bin` — compact node info list (a few hundred entries) for warm start.
   Saved every 5 min and on SIGINT.
-- `items/<hex-target>.bin` — items the daemon should republish. Format:
-  `seq(8) || salt_len(1) || salt || sig(64) || v_len(2) || v_bencoded`.
+- `items/<hex-target>.json` — items the daemon stores for republish + inbound
+  serve. Human-readable JSON; binary fields are hex-encoded. Mutable items
+  carry `mutable:true, pk, seq, salt?, sig, v`; immutable items carry
+  `mutable:false, v`. Storing `pk` lets the daemon return a fully-verifiable
+  mutable response on inbound `get` (without `pk`, third-party requesters
+  can't validate the signature).
 - `sock` — UNIX socket the daemon listens on. Removed on clean shutdown.
 - `lock` — `flock`-based mutex so a daemon and a CLI command don't collide.
 
