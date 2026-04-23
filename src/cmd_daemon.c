@@ -627,6 +627,8 @@ op_get(int client_idx, const bencode_value *req)
         return;
     }
     int is_mutable = (mut && mut->type == BENCODE_INT && mut->i != 0);
+    const bencode_value *nocache = bencode_dict_get(req, "no_cache");
+    int skip_local = (nocache && nocache->type == BENCODE_INT && nocache->i != 0);
 
     uint8_t target_buf[BEP44_TARGET_LEN];
     memcpy(target_buf, target->str.bytes, BEP44_TARGET_LEN);
@@ -636,9 +638,11 @@ op_get(int client_idx, const bencode_value *req)
      * the stored copy immediately. Avoids a full network lookup (which
      * may converge to a different set of peers than the put hit) and
      * makes "put then immediately get on the same daemon" reliable.
+     * Skipped when the client passed --no-cache (forces a network test).
      */
     stored_item si = {0};
-    if (state_load_item(target_buf, &si) == 0
+    if (!skip_local
+        && state_load_item(target_buf, &si) == 0
         && si.mutable_ == is_mutable) {
         char tgthex[17]; hex8(tgthex, target_buf);
         fprintf(stderr,

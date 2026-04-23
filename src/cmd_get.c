@@ -13,9 +13,11 @@
 #include "state.h"
 
 static const char USAGE_GET[] =
-    "usage: dht44 get --target HEX\n"
-    "       dht44 get -k KEYFILE [--salt S]\n"
-    "       dht44 get --pubkey HEX [--salt S]\n";
+    "usage: dht44 get --target HEX                    [--no-cache] [--bencode]\n"
+    "       dht44 get -k KEYFILE [--salt S]          [--no-cache] [--bencode]\n"
+    "       dht44 get --pubkey HEX [--salt S]        [--no-cache] [--bencode]\n"
+    "  --no-cache  bypass daemon's local items store; force network lookup.\n"
+    "  --bencode   write the raw bencoded `v` to stdout (no string decode).\n";
 
 static int
 hex2byte(char hi, char lo, uint8_t *out)
@@ -48,6 +50,7 @@ cmd_get(int argc, char **argv)
     const char *salt = NULL;
     size_t salt_len = 0;
     int is_bencode_out = 0;     /* default: print v as raw bytes */
+    int no_cache = 0;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--target") == 0 && i + 1 < argc) {
@@ -61,6 +64,8 @@ cmd_get(int argc, char **argv)
             salt_len = strlen(salt);
         } else if (strcmp(argv[i], "--bencode") == 0) {
             is_bencode_out = 1;
+        } else if (strcmp(argv[i], "--no-cache") == 0) {
+            no_cache = 1;
         } else {
             fputs(USAGE_GET, stderr);
             return 1;
@@ -109,14 +114,17 @@ cmd_get(int argc, char **argv)
         is_mutable = 1;
     }
 
-    /* IPC request: { mutable: 0|1, op:"get", target } */
+    /* IPC request: { mutable: 0|1, no_cache?: 1, op:"get", target } */
     uint8_t req[256];
     bencode_writer w;
     bencode_writer_init(&w, req, sizeof(req));
     bencode_dict_open(&w);
-        bencode_cstr(&w, "mutable"); bencode_int(&w, is_mutable);
-        bencode_cstr(&w, "op");      bencode_cstr(&w, "get");
-        bencode_cstr(&w, "target");  bencode_str(&w, target, BEP44_TARGET_LEN);
+        bencode_cstr(&w, "mutable");  bencode_int(&w, is_mutable);
+        if (no_cache) {
+            bencode_cstr(&w, "no_cache"); bencode_int(&w, 1);
+        }
+        bencode_cstr(&w, "op");       bencode_cstr(&w, "get");
+        bencode_cstr(&w, "target");   bencode_str(&w, target, BEP44_TARGET_LEN);
     bencode_dict_close(&w);
     ssize_t reqn = bencode_writer_finish(&w);
     if (reqn < 0) return 1;
