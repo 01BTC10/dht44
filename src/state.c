@@ -430,6 +430,9 @@ state_save_item(const uint8_t target[BEP44_TARGET_LEN], const stored_item *item)
 
     json_object_set_new(root, "mutable",
                         item->mutable_ ? json_true() : json_false());
+    json_object_set_new(root, "origin",
+                        json_string(item->origin == ITEM_ORIGIN_PEER
+                                    ? "peer" : "self"));
 
     char *v_hex = state_bytes_to_hex(item->v, item->v_len);
     if (!v_hex) { json_decref(root); return -1; }
@@ -492,6 +495,13 @@ state_load_item(const uint8_t target[BEP44_TARGET_LEN], stored_item *out)
     memset(out, 0, sizeof(*out));
     json_t *jmut = json_object_get(root, "mutable");
     out->mutable_ = jmut && json_is_true(jmut) ? 1 : 0;
+    json_t *jorg = json_object_get(root, "origin");
+    if (jorg && json_is_string(jorg)
+        && strcmp(json_string_value(jorg), "peer") == 0) {
+        out->origin = ITEM_ORIGIN_PEER;
+    } else {
+        out->origin = ITEM_ORIGIN_SELF;
+    }
 
     json_t *jv = json_object_get(root, "v");
     if (!jv || !json_is_string(jv)) goto bad;

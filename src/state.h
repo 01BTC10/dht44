@@ -71,15 +71,21 @@ int state_load_nodes(struct sockaddr_in *out, int max, int *count_out);
  *   { "mutable": false,
  *     "v":   "<2*vlen-hex>" }
  */
+typedef enum {
+    ITEM_ORIGIN_SELF = 0,    /* we put it via the CLI; republish loop owns it */
+    ITEM_ORIGIN_PEER = 1,    /* a remote peer asked us to store it */
+} item_origin;
+
 typedef struct {
-    int      mutable_;
-    uint8_t  pk[BEP44_PK_LEN];
-    int64_t  seq;
-    uint8_t  salt[BEP44_MAX_SALT];
-    size_t   salt_len;
-    uint8_t  sig[BEP44_SIG_LEN];
-    uint8_t  v[BEP44_MAX_V];
-    size_t   v_len;
+    int          mutable_;
+    item_origin  origin;
+    uint8_t      pk[BEP44_PK_LEN];
+    int64_t      seq;
+    uint8_t      salt[BEP44_MAX_SALT];
+    size_t       salt_len;
+    uint8_t      sig[BEP44_SIG_LEN];
+    uint8_t      v[BEP44_MAX_V];
+    size_t       v_len;
 } stored_item;
 
 int state_save_item(const uint8_t target[BEP44_TARGET_LEN],

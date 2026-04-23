@@ -143,6 +143,7 @@ static unsigned long g_q_in_get  = 0;
 static unsigned long g_q_in_put  = 0;
 static unsigned long g_q_out     = 0;
 static unsigned long g_ipc_reqs  = 0;
+static unsigned long g_items_stored_peer = 0;   /* successful peer-origin puts */
 
 static const char *
 sa_str(const struct sockaddr *peer, char buf[24])
@@ -789,53 +790,184 @@ on_inbound_query(const struct sockaddr *peer, int peerlen,
         return;
     }
 
-    /* PUT — validate token, sig, accept */
+    /* PUT — full validation + persist for republish + serve */
     const bencode_value *target = bencode_dict_get(a, "target");
     const bencode_value *tok    = bencode_dict_get(a, "token");
     const bencode_value *v      = bencode_dict_get(a, "v");
+    const bencode_value *k      = bencode_dict_get(a, "k");
+    const bencode_value *salt   = bencode_dict_get(a, "salt");
+    const bencode_value *seqv   = bencode_dict_get(a, "seq");
+    const bencode_value *sig    = bencode_dict_get(a, "sig");
+    const bencode_value *casv   = bencode_dict_get(a, "cas");
+
     if (!tok || tok->type != BENCODE_STR || !v || v->type != BENCODE_STR) return;
-    {
-        char addr[24];
-        sa_str(peer, addr);
-        fprintf(stderr, "[dht44:daemon] <- put from %s\n", addr);
-        g_q_in_put++;
-    }
 
+    char addr[24];
+    sa_str(peer, addr);
+    g_q_in_put++;
+
+    int is_mutable = (k && k->type == BENCODE_STR && k->str.len == BEP44_PK_LEN
+                      && sig && sig->type == BENCODE_STR && sig->str.len == BEP44_SIG_LEN
+                      && seqv && seqv->type == BENCODE_INT);
+
+    /* Re-encode v as the bencoded form ('hello' → '5:hello') for sig + target. */
+    uint8_t vb[BEP44_MAX_V + 16];
+    bencode_writer vw;
+    bencode_writer_init(&vw, vb, sizeof(vb));
+    bencode_str(&vw, v->str.bytes, v->str.len);
+    ssize_t vb_len = bencode_writer_finish(&vw);
+
+    /* Compute the canonical target ourselves: SHA1(k||salt) for mutable,
+     * SHA1(v_bencoded) for immutable. We ignore any client-supplied target
+     * field except as a sanity check below. */
     uint8_t target_buf[BEP44_TARGET_LEN];
-    if (target && target->type == BENCODE_STR
-        && target->str.len == BEP44_TARGET_LEN) {
-        memcpy(target_buf, target->str.bytes, BEP44_TARGET_LEN);
-    } else {
-        /* compute target ourselves */
-        const bencode_value *k = bencode_dict_get(a, "k");
-        const bencode_value *salt = bencode_dict_get(a, "salt");
-        if (k && k->type == BENCODE_STR && k->str.len == BEP44_PK_LEN) {
-            const uint8_t *salt_bytes = NULL;
-            size_t salt_len = 0;
-            if (salt && salt->type == BENCODE_STR) {
-                salt_bytes = salt->str.bytes;
-                salt_len = salt->str.len;
-            }
-            bep44_target(target_buf, k->str.bytes, salt_bytes, salt_len);
-        } else {
-            bep44_immutable_target(target_buf, v->str.bytes, v->str.len);
-        }
-    }
+    char    tgthex[17];
+    size_t  salt_len = (salt && salt->type == BENCODE_STR) ? salt->str.len : 0;
+    const uint8_t *salt_bytes = salt_len > 0 ? salt->str.bytes : NULL;
 
+    if (is_mutable) {
+        if (salt_len > BEP44_MAX_SALT) {
+            fprintf(stderr,
+                    "[dht44:daemon] <- put from %s REJECTED: salt too long (%zu)\n",
+                    addr, salt_len);
+            uint8_t out[128];
+            ssize_t n = bep44_build_error(out, sizeof(out), tid, tid_len,
+                                          207, "salt too long");
+            if (n > 0) { dht_wrap_sendto(peer, peerlen, out, (size_t)n); g_pkts_out++; }
+            return;
+        }
+        bep44_target(target_buf, k->str.bytes, salt_bytes, salt_len);
+    } else {
+        if (vb_len < 0) {
+            fprintf(stderr, "[dht44:daemon] <- put from %s REJECTED: v too big\n", addr);
+            return;
+        }
+        bep44_immutable_target(target_buf, vb, (size_t)vb_len);
+    }
+    hex8(tgthex, target_buf);
+
+    /* Token check (we issued it earlier in response to a get) */
     if (!token_matches(tok->str.bytes, tok->str.len, p4, target_buf)) {
+        fprintf(stderr,
+                "[dht44:daemon] <- put from %s target=%s.. type=%s REJECTED: bad token\n",
+                addr, tgthex, is_mutable ? "mut" : "imm");
         uint8_t out[256];
-        ssize_t n = bep44_build_error(out, sizeof(out), tid, tid_len, 203, "bad token");
-        if (n > 0) dht_wrap_sendto(peer, peerlen, out, (size_t)n);
+        ssize_t n = bep44_build_error(out, sizeof(out), tid, tid_len,
+                                      203, "bad token");
+        if (n > 0) { dht_wrap_sendto(peer, peerlen, out, (size_t)n); g_pkts_out++; }
         return;
     }
 
-    /* Accept and persist (no sig verification yet for inbound — see TODO) */
-    /* TODO commit-12: verify sig, enforce seq monotonicity, handle CAS. */
+    /* If client supplied target, sanity-check */
+    if (target && target->type == BENCODE_STR
+        && target->str.len == BEP44_TARGET_LEN
+        && memcmp(target->str.bytes, target_buf, BEP44_TARGET_LEN) != 0) {
+        fprintf(stderr,
+                "[dht44:daemon] <- put from %s target=%s.. REJECTED: claimed target mismatch\n",
+                addr, tgthex);
+        uint8_t out[256];
+        ssize_t n = bep44_build_error(out, sizeof(out), tid, tid_len,
+                                      203, "target mismatch");
+        if (n > 0) { dht_wrap_sendto(peer, peerlen, out, (size_t)n); g_pkts_out++; }
+        return;
+    }
+
+    fprintf(stderr,
+            "[dht44:daemon] <- put from %s target=%s.. type=%s v_len=%zu%s\n",
+            addr, tgthex, is_mutable ? "mut" : "imm", v->str.len,
+            is_mutable ? "" : "");
+
+    if (is_mutable) {
+        /* Verify signature over [salt? + seq + v_bencoded] */
+        uint8_t signable[BEP44_MAX_V + 128];
+        ssize_t slen = bep44_signable(signable, sizeof(signable),
+                                      salt_bytes, salt_len,
+                                      seqv->i, vb, (size_t)vb_len);
+        if (slen < 0
+            || bep44_verify(sig->str.bytes, k->str.bytes,
+                            signable, (size_t)slen) < 0) {
+            fprintf(stderr, "[dht44:daemon]    REJECTED: invalid signature\n");
+            uint8_t out[256];
+            ssize_t n = bep44_build_error(out, sizeof(out), tid, tid_len,
+                                          206, "invalid signature");
+            if (n > 0) { dht_wrap_sendto(peer, peerlen, out, (size_t)n); g_pkts_out++; }
+            return;
+        }
+
+        /* Seq monotonicity + CAS against current store */
+        stored_item existing = {0};
+        int have_existing = (state_load_item(target_buf, &existing) == 0);
+        if (have_existing && existing.mutable_) {
+            if (casv && casv->type == BENCODE_INT && casv->i != existing.seq) {
+                fprintf(stderr,
+                        "[dht44:daemon]    REJECTED: CAS mismatch (got %lld, have %lld)\n",
+                        (long long)casv->i, (long long)existing.seq);
+                uint8_t out[256];
+                ssize_t n = bep44_build_error(out, sizeof(out), tid, tid_len,
+                                              301, "CAS mismatch");
+                if (n > 0) { dht_wrap_sendto(peer, peerlen, out, (size_t)n); g_pkts_out++; }
+                return;
+            }
+            if (seqv->i <= existing.seq) {
+                fprintf(stderr,
+                        "[dht44:daemon]    REJECTED: seq regression (got %lld, have %lld)\n",
+                        (long long)seqv->i, (long long)existing.seq);
+                uint8_t out[256];
+                ssize_t n = bep44_build_error(out, sizeof(out), tid, tid_len,
+                                              302, "seq must be > current");
+                if (n > 0) { dht_wrap_sendto(peer, peerlen, out, (size_t)n); g_pkts_out++; }
+                return;
+            }
+        }
+
+        /* OK — persist */
+        stored_item si = {0};
+        si.mutable_ = 1;
+        /* Preserve self-origin if we already had this target as ours
+         * (e.g. another peer is mirroring our value back at us). */
+        si.origin   = (have_existing && existing.origin == ITEM_ORIGIN_SELF)
+                      ? ITEM_ORIGIN_SELF : ITEM_ORIGIN_PEER;
+        memcpy(si.pk, k->str.bytes, BEP44_PK_LEN);
+        si.seq = seqv->i;
+        if (salt_len) { memcpy(si.salt, salt_bytes, salt_len); si.salt_len = salt_len; }
+        memcpy(si.sig, sig->str.bytes, BEP44_SIG_LEN);
+        memcpy(si.v, v->str.bytes, v->str.len);
+        si.v_len = v->str.len;
+        if (state_save_item(target_buf, &si) < 0) {
+            fprintf(stderr, "[dht44:daemon]    REJECTED: state_save_item failed\n");
+            return;
+        }
+        if (si.origin == ITEM_ORIGIN_PEER) g_items_stored_peer++;
+        fprintf(stderr,
+                "[dht44:daemon]    ACCEPTED (mut, %s, seq %lld%s)\n",
+                si.origin == ITEM_ORIGIN_SELF ? "self" : "peer",
+                (long long)si.seq,
+                have_existing
+                    ? (existing.seq < si.seq ? ", replaces older" : ", new")
+                    : ", new");
+    } else {
+        /* Immutable — store v_bencoded so target = SHA1(v_b) holds. */
+        stored_item si = {0};
+        si.mutable_ = 0;
+        si.origin = ITEM_ORIGIN_PEER;       /* immutable inbound is always peer */
+        if (vb_len < 0 || (size_t)vb_len > sizeof(si.v)) {
+            fprintf(stderr, "[dht44:daemon]    REJECTED: v_bencoded too large\n");
+            return;
+        }
+        memcpy(si.v, vb, (size_t)vb_len);
+        si.v_len = (size_t)vb_len;
+        if (state_save_item(target_buf, &si) < 0) {
+            fprintf(stderr, "[dht44:daemon]    REJECTED: state_save_item failed\n");
+            return;
+        }
+        g_items_stored_peer++;
+        fprintf(stderr, "[dht44:daemon]    ACCEPTED (imm, peer)\n");
+    }
 
     uint8_t out[256];
     ssize_t n = bep44_build_put_response(out, sizeof(out), tid, tid_len,
                                          dht_wrap_node_id());
-    if (n > 0) dht_wrap_sendto(peer, peerlen, out, (size_t)n);
+    if (n > 0) { dht_wrap_sendto(peer, peerlen, out, (size_t)n); g_pkts_out++; }
 }
 
 /* ============================================================
@@ -864,6 +996,11 @@ republish_one(const uint8_t target[BEP44_TARGET_LEN], void *closure)
     (void)closure;
     stored_item si = {0};
     if (state_load_item(target, &si) < 0) return 0;     /* skip on read error */
+
+    /* Only republish things WE put. Peer-origin items are stored for inbound
+     * serving but the original publisher is responsible for keeping them
+     * alive on the network — we shouldn't claim ownership by re-publishing. */
+    if (si.origin == ITEM_ORIGIN_PEER) return 0;
 
     put_ctx *p = put_ctx_alloc();
     if (!p) return 0;
@@ -1109,9 +1246,10 @@ cmd_daemon(int argc, char **argv)
             dht_wrap_status(&g, &d);
             if (g != last_good || g_pkts_in || g_pkts_out || g_ipc_reqs) {
                 fprintf(stderr,
-                    "[dht44:daemon] table good=%d dub=%d  rx=%lu tx=%lu  q_in[get=%lu put=%lu] q_out=%lu  ipc=%lu\n",
+                    "[dht44:daemon] table good=%d dub=%d  rx=%lu tx=%lu  q_in[get=%lu put=%lu] q_out=%lu  ipc=%lu  stored_for_peers=%lu\n",
                     g, d, g_pkts_in, g_pkts_out,
-                    g_q_in_get, g_q_in_put, g_q_out, g_ipc_reqs);
+                    g_q_in_get, g_q_in_put, g_q_out, g_ipc_reqs,
+                    g_items_stored_peer);
                 last_good = g;
             }
             next_status = now + 30;
