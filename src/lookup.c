@@ -315,13 +315,20 @@ ingest_value(lookup_run *L, const struct sockaddr *peer,
     memset(lv, 0, sizeof(*lv));
     if (peer) lv->from = *(const struct sockaddr_in *)peer;
 
-    /* For BEP 44 the `v` field is most commonly a bencode string. We support
-     * the general case by asking the encoder to write `v` back: walk the
-     * tree. Simpler implementation: re-encode via a small helper. */
+    /* Store the BENCODED form of v (e.g. "9:hello 888"), not the decoded
+     * bytes. Downstream IPC serialisation expects the bencoded form so that
+     * a `bencode_str(...)` call wraps it with one outer length prefix and
+     * the CLI can re-parse to extract the inner value.
+     *
+     * For BEP 44 the `v` field is most commonly a bencode string; non-string
+     * v is theoretically allowed but unusual. We only support strings here. */
     if (v->type == BENCODE_STR) {
-        if (v->str.len > BEP44_MAX_V) return;
-        memcpy(lv->v, v->str.bytes, v->str.len);
-        lv->v_len = v->str.len;
+        bencode_writer w;
+        bencode_writer_init(&w, lv->v, sizeof(lv->v));
+        bencode_str(&w, v->str.bytes, v->str.len);
+        ssize_t n = bencode_writer_finish(&w);
+        if (n < 0) return;
+        lv->v_len = (size_t)n;
     } else {
         /* Emit a generic re-encoding.  TODO: support non-string v.  For now
          * skip — daemons typically wrap as bencode string. */

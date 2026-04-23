@@ -478,14 +478,17 @@ on_get_lookup_done(int rc,
         bencode_dict_open(&w);
             bencode_cstr(&w, "found"); bencode_int(&w, best ? 1 : 0);
             if (best && g->mutable_) {
+                /* best->v already holds the bencoded form (e.g. "9:hello"); wrap
+                 * with bencode_str so the IPC dict is valid bencode and the CLI
+                 * can re-parse it to extract the inner value. */
                 bencode_cstr(&w, "k");   bencode_str(&w, best->k, BEP44_PK_LEN);
                 bencode_cstr(&w, "ok");  bencode_int(&w, 1);
                 bencode_cstr(&w, "seq"); bencode_int(&w, best->seq);
                 bencode_cstr(&w, "sig"); bencode_str(&w, best->sig, BEP44_SIG_LEN);
-                bencode_cstr(&w, "v");   bencode_raw(&w, best->v, best->v_len);
+                bencode_cstr(&w, "v");   bencode_str(&w, best->v, best->v_len);
             } else if (best) {
                 bencode_cstr(&w, "ok"); bencode_int(&w, 1);
-                bencode_cstr(&w, "v");  bencode_raw(&w, best->v, best->v_len);
+                bencode_cstr(&w, "v");  bencode_str(&w, best->v, best->v_len);
             } else {
                 bencode_cstr(&w, "ok"); bencode_int(&w, 0);
             }
