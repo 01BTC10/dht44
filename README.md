@@ -40,9 +40,9 @@ git submodule update --init --recursive
 
 | Command | Description | Needs daemon |
 |---|---|---|
-| `keygen -o KEYFILE` | Generate Ed25519 keypair | no |
-| `pubkey -k KEYFILE` | Print pubkey hex | no |
-| `target -k KEYFILE [--salt S]` | Print BEP 44 target hex | no |
+| `keygen -o KEYFILE [-k EXISTING ...] [--salt S ...]` | Generate keypair, write JSON to KEYFILE and stdout. Repeat `--salt` to precompute multiple targets; repeat `-k` to also include existing keys in the output. | no |
+| `pubkey -k KEYFILE` | Print pubkey hex from a JSON keyfile | no |
+| `target -k KEYFILE [--salt S]` | Print BEP 44 target hex from a JSON keyfile | no |
 | `put -k KEYFILE [--salt S] --seq N [--cas M] [--bencode\|--string] VALUE` | Store mutable item | yes |
 | `put-immutable [--bencode\|--string] VALUE` | Store immutable item | yes |
 | `get --target HEX` | Retrieve immutable item by target | yes |
@@ -56,7 +56,8 @@ Exit codes: `0` success, `1` usage, `2` network/timeout, `3` crypto verify failu
 ## State directory
 
 `~/.dht44/` (mode 0700):
-- `key.bin` — Ed25519 secret key, mode 0600.
+- Keyfiles are JSON. `dht44 keygen -o PATH` writes `PATH` (mode 0600) AND prints the same JSON to stdout. Schema:
+  `{ "keys": [ { "sk": "<128 hex>", "pk": "<64 hex>", "targets": { "": "<40 hex>", "<salt>": "<40 hex>", ... } }, ... ] }`
 - `node_id.bin` — 20 B persistent DHT node ID.
 - `nodes.bin` — compact node list for warm start.
 - `items/<hex-target>.json` — daemon's republish + serve queue (human-readable).

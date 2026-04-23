@@ -91,4 +91,11 @@ int state_load_item(const uint8_t target[BEP44_TARGET_LEN],
 typedef int (*state_item_cb)(const uint8_t target[BEP44_TARGET_LEN], void *closure);
 int state_walk_items(state_item_cb cb, void *closure);
 
+/* Hex helpers (used by state.c, cmd_keygen, etc.).
+ * state_bytes_to_hex returns a newly malloc'd, NUL-terminated string.
+ * state_hex_to_bytes parses exactly expected_len bytes from a hex string;
+ * returns 0 on success, -1 on length mismatch / non-hex input. */
+char *state_bytes_to_hex(const uint8_t *bytes, size_t len);
+int   state_hex_to_bytes(const char *hex, uint8_t *out, size_t expected_len);
+
 #endif

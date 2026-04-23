@@ -20,6 +20,38 @@
  * 4096 covers Linux's PATH_MAX; all our paths are short suffixes of $DHT44_HOME. */
 #define PATH_MAX 4096
 
+/* ============================================================
+ * Public hex helpers (declared in state.h)
+ * ============================================================ */
+
+char *
+state_bytes_to_hex(const uint8_t *bytes, size_t len)
+{
+    static const char *d = "0123456789abcdef";
+    char *out = malloc(len * 2 + 1);
+    if (!out) return NULL;
+    for (size_t i = 0; i < len; i++) {
+        out[i * 2]     = d[bytes[i] >> 4];
+        out[i * 2 + 1] = d[bytes[i] & 0xf];
+    }
+    out[len * 2] = '\0';
+    return out;
+}
+
+int
+state_hex_to_bytes(const char *hex, uint8_t *out, size_t expected_len)
+{
+    if (!hex) return -1;
+    if (strlen(hex) != expected_len * 2) return -1;
+    for (size_t i = 0; i < expected_len; i++) {
+        char hi = hex[i * 2], lo = hex[i * 2 + 1];
+        if (!isxdigit((unsigned char)hi) || !isxdigit((unsigned char)lo)) return -1;
+        char b[3] = { hi, lo, '\0' };
+        out[i] = (uint8_t)strtoul(b, NULL, 16);
+    }
+    return 0;
+}
+
 #include <sodium.h>
 
 /* ============================================================
@@ -182,26 +214,80 @@ read_all(const char *path, void *out, size_t cap)
  * Keyfile
  * ============================================================ */
 
+/*
+ * Keyfiles are JSON. Schema:
+ *   { "keys": [
+ *       { "sk": "<128 hex>",
+ *         "pk": "<64 hex>",
+ *         "targets": { "": "<40 hex>", "saltA": "<40 hex>", ... } },
+ *       ... additional keys ...
+ *     ] }
+ *
+ * state_load_key returns the sk of the FIRST entry. cmd_pubkey / cmd_target
+ * use the full JSON via state_load_keyfile_json() if they need other fields.
+ */
+
 int
 state_save_key(const char *path, const uint8_t sk[BEP44_SK_LEN])
 {
-    return write_atomic(path, sk, BEP44_SK_LEN, 0600);
+    /* Convenience: write a one-key JSON containing sk + pk (no salts/targets).
+     * For richer keygen output, see cmd_keygen which builds the JSON itself. */
+    uint8_t pk[BEP44_PK_LEN];
+    if (crypto_sign_ed25519_sk_to_pk(pk, sk) != 0) return -1;
+
+    char *sk_hex = state_bytes_to_hex(sk, BEP44_SK_LEN);
+    char *pk_hex = state_bytes_to_hex(pk, BEP44_PK_LEN);
+    if (!sk_hex || !pk_hex) { free(sk_hex); free(pk_hex); return -1; }
+
+    json_t *root = json_object();
+    json_t *keys = json_array();
+    json_t *one  = json_object();
+    json_object_set_new(one, "sk", json_string(sk_hex));
+    json_object_set_new(one, "pk", json_string(pk_hex));
+    json_array_append_new(keys, one);
+    json_object_set_new(root, "keys", keys);
+    free(sk_hex); free(pk_hex);
+
+    char *txt = json_dumps(root, JSON_INDENT(2) | JSON_SORT_KEYS);
+    json_decref(root);
+    if (!txt) return -1;
+    int rc = write_atomic(path, txt, strlen(txt), 0600);
+    free(txt);
+    return rc;
 }
 
 int
 state_load_key(const char *path, uint8_t sk[BEP44_SK_LEN])
 {
-    ssize_t n = read_all(path, sk, BEP44_SK_LEN);
+    uint8_t buf[16384];
+    ssize_t n = read_all(path, buf, sizeof(buf) - 1);
     if (n < 0) {
         fprintf(stderr, "[dht44:state] open %s: %s\n", path, strerror(errno));
         return -1;
     }
-    if (n != (ssize_t)BEP44_SK_LEN) {
-        fprintf(stderr, "[dht44:state] %s: expected %d bytes, got %zd\n",
-                path, BEP44_SK_LEN, n);
-        sodium_memzero(sk, BEP44_SK_LEN);
+    buf[n] = 0;
+
+    json_error_t err;
+    json_t *root = json_loads((const char *)buf, 0, &err);
+    if (!root) {
+        fprintf(stderr, "[dht44:state] %s: not valid JSON (%s)\n", path, err.text);
         return -1;
     }
+    json_t *keys = json_object_get(root, "keys");
+    if (!keys || !json_is_array(keys) || json_array_size(keys) == 0) {
+        fprintf(stderr, "[dht44:state] %s: missing keys[]\n", path);
+        json_decref(root);
+        return -1;
+    }
+    json_t *first = json_array_get(keys, 0);
+    json_t *jsk = json_object_get(first, "sk");
+    if (!jsk || !json_is_string(jsk)
+        || state_hex_to_bytes(json_string_value(jsk), sk, BEP44_SK_LEN) < 0) {
+        fprintf(stderr, "[dht44:state] %s: missing/bad sk on keys[0]\n", path);
+        json_decref(root);
+        return -1;
+    }
+    json_decref(root);
     return 0;
 }
 
@@ -331,35 +417,6 @@ item_path(char *out, size_t cap, const uint8_t target[BEP44_TARGET_LEN])
     return (n < 0 || (size_t)n >= cap) ? -1 : 0;
 }
 
-/* Generic hex helpers — bytes <-> alloc'd C string. */
-static char *
-bytes_to_hexstr(const uint8_t *bytes, size_t len)
-{
-    static const char *d = "0123456789abcdef";
-    char *out = malloc(len * 2 + 1);
-    if (!out) return NULL;
-    for (size_t i = 0; i < len; i++) {
-        out[i * 2]     = d[bytes[i] >> 4];
-        out[i * 2 + 1] = d[bytes[i] & 0xf];
-    }
-    out[len * 2] = '\0';
-    return out;
-}
-
-static int
-hexstr_to_bytes(const char *hex, uint8_t *out, size_t expected_len)
-{
-    if (!hex) return -1;
-    if (strlen(hex) != expected_len * 2) return -1;
-    for (size_t i = 0; i < expected_len; i++) {
-        char hi = hex[i * 2], lo = hex[i * 2 + 1];
-        if (!isxdigit((unsigned char)hi) || !isxdigit((unsigned char)lo)) return -1;
-        char b[3] = { hi, lo, '\0' };
-        out[i] = (uint8_t)strtoul(b, NULL, 16);
-    }
-    return 0;
-}
-
 int
 state_save_item(const uint8_t target[BEP44_TARGET_LEN], const stored_item *item)
 {
@@ -374,12 +431,12 @@ state_save_item(const uint8_t target[BEP44_TARGET_LEN], const stored_item *item)
     json_object_set_new(root, "mutable",
                         item->mutable_ ? json_true() : json_false());
 
-    char *v_hex = bytes_to_hexstr(item->v, item->v_len);
+    char *v_hex = state_bytes_to_hex(item->v, item->v_len);
     if (!v_hex) { json_decref(root); return -1; }
 
     if (item->mutable_) {
-        char *pk_hex  = bytes_to_hexstr(item->pk,  BEP44_PK_LEN);
-        char *sig_hex = bytes_to_hexstr(item->sig, BEP44_SIG_LEN);
+        char *pk_hex  = state_bytes_to_hex(item->pk,  BEP44_PK_LEN);
+        char *sig_hex = state_bytes_to_hex(item->sig, BEP44_SIG_LEN);
         if (!pk_hex || !sig_hex) {
             free(pk_hex); free(sig_hex); free(v_hex);
             json_decref(root);
@@ -388,7 +445,7 @@ state_save_item(const uint8_t target[BEP44_TARGET_LEN], const stored_item *item)
         json_object_set_new(root, "pk",  json_string(pk_hex));
         json_object_set_new(root, "seq", json_integer(item->seq));
         if (item->salt_len > 0) {
-            char *salt_hex = bytes_to_hexstr(item->salt, item->salt_len);
+            char *salt_hex = state_bytes_to_hex(item->salt, item->salt_len);
             if (!salt_hex) {
                 free(pk_hex); free(sig_hex); free(v_hex);
                 json_decref(root);
@@ -441,7 +498,7 @@ state_load_item(const uint8_t target[BEP44_TARGET_LEN], stored_item *out)
     {
         const char *vhex = json_string_value(jv);
         size_t vlen = strlen(vhex) / 2;
-        if (vlen > BEP44_MAX_V || hexstr_to_bytes(vhex, out->v, vlen) < 0) goto bad;
+        if (vlen > BEP44_MAX_V || state_hex_to_bytes(vhex, out->v, vlen) < 0) goto bad;
         out->v_len = vlen;
     }
 
@@ -451,18 +508,18 @@ state_load_item(const uint8_t target[BEP44_TARGET_LEN], stored_item *out)
         json_t *jsig = json_object_get(root, "sig");
         json_t *jsalt = json_object_get(root, "salt");
         if (!jpk || !json_is_string(jpk)
-            || hexstr_to_bytes(json_string_value(jpk), out->pk, BEP44_PK_LEN) < 0)
+            || state_hex_to_bytes(json_string_value(jpk), out->pk, BEP44_PK_LEN) < 0)
             goto bad;
         if (!jseq || !json_is_integer(jseq)) goto bad;
         out->seq = json_integer_value(jseq);
         if (!jsig || !json_is_string(jsig)
-            || hexstr_to_bytes(json_string_value(jsig), out->sig, BEP44_SIG_LEN) < 0)
+            || state_hex_to_bytes(json_string_value(jsig), out->sig, BEP44_SIG_LEN) < 0)
             goto bad;
         if (jsalt && json_is_string(jsalt)) {
             const char *shex = json_string_value(jsalt);
             size_t slen = strlen(shex) / 2;
             if (slen > BEP44_MAX_SALT
-                || hexstr_to_bytes(shex, out->salt, slen) < 0)
+                || state_hex_to_bytes(shex, out->salt, slen) < 0)
                 goto bad;
             out->salt_len = slen;
         }
