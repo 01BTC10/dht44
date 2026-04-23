@@ -356,6 +356,11 @@ dht_wrap_init(uint16_t port)
         return -1;
     }
 
+    /* Optional jech-internal debug logging via env var */
+    if (getenv("DHT_DEBUG")) {
+        extern FILE *dht_debug;
+        dht_debug = stderr;
+    }
     /* Version: "DH44" — 4 bytes */
     if (dht_init(s_sock, -1, s_node_id, (const unsigned char *)"DH44") < 0) {
         fprintf(stderr, "[dht44:dht_wrap] dht_init failed\n");

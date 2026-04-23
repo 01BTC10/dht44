@@ -17,7 +17,12 @@ test: $(TESTS)
 tests/test_%: tests/test_%.c $(filter-out src/main.o,$(OBJ))
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
 
+INTEGRATION_TESTS := $(wildcard tests/integration/*.sh)
+
+integration: dht44
+	@for s in $(INTEGRATION_TESTS); do echo "==> $$s"; bash $$s || exit 1; done
+
 clean:
 	rm -f $(OBJ) dht44 $(TESTS)
 
-.PHONY: clean test
+.PHONY: clean test integration

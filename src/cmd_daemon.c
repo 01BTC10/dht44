@@ -15,6 +15,7 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <netdb.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -41,23 +42,29 @@
  * Args
  * ============================================================ */
 
+#define MAX_BOOTSTRAP 8
+
 typedef struct {
     uint16_t port;
     int      republish_min;
     int      no_upnp;
     int      upnp_lifetime;
+    int      no_routers;            /* skip pinging public bootstrap routers */
+    const char *bootstrap[MAX_BOOTSTRAP];
+    int      bootstrap_count;
 } daemon_args;
 
 static const char USAGE_DAEMON[] =
-    "usage: dht44 daemon [--port N] [--republish MIN]"
-    " [--no-upnp] [--upnp-lifetime SEC]\n";
+    "usage: dht44 daemon [--port N] [--republish MIN] [--no-upnp]\n"
+    "                    [--upnp-lifetime SEC] [--bootstrap HOST:PORT]...\n"
+    "                    [--no-routers]\n";
 
 static int
 parse_args(int argc, char **argv, daemon_args *a)
 {
+    memset(a, 0, sizeof(*a));
     a->port = 6881;
     a->republish_min = 60;
-    a->no_upnp = 0;
     a->upnp_lifetime = 3600;
 
     for (int i = 1; i < argc; i++) {
@@ -67,14 +74,46 @@ parse_args(int argc, char **argv, daemon_args *a)
             a->republish_min = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--no-upnp") == 0) {
             a->no_upnp = 1;
+        } else if (strcmp(argv[i], "--no-routers") == 0) {
+            a->no_routers = 1;
         } else if (strcmp(argv[i], "--upnp-lifetime") == 0 && i + 1 < argc) {
             a->upnp_lifetime = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--bootstrap") == 0 && i + 1 < argc) {
+            if (a->bootstrap_count >= MAX_BOOTSTRAP) {
+                fprintf(stderr, "[dht44:daemon] too many --bootstrap entries\n");
+                return -1;
+            }
+            a->bootstrap[a->bootstrap_count++] = argv[++i];
         } else {
             fputs(USAGE_DAEMON, stderr);
             return -1;
         }
     }
     return 0;
+}
+
+/* "host:port" → ping. Used by --bootstrap */
+static int
+ping_host_port(const char *hp)
+{
+    char buf[256];
+    snprintf(buf, sizeof(buf), "%s", hp);
+    char *colon = strrchr(buf, ':');
+    if (!colon) return -1;
+    *colon = 0;
+    const char *host = buf;
+    const char *port = colon + 1;
+
+    struct addrinfo hints = { .ai_family = AF_INET, .ai_socktype = SOCK_DGRAM };
+    struct addrinfo *res = NULL;
+    if (getaddrinfo(host, port, &hints, &res) != 0) return -1;
+    int rc = -1;
+    for (struct addrinfo *ai = res; ai; ai = ai->ai_next) {
+        extern int dht_ping_node(const struct sockaddr *sa, int salen);
+        if (dht_ping_node(ai->ai_addr, (int)ai->ai_addrlen) >= 0) { rc = 0; break; }
+    }
+    freeaddrinfo(res);
+    return rc;
 }
 
 /* ============================================================
@@ -856,6 +895,17 @@ cmd_daemon(int argc, char **argv)
         }
     }
 
+    /* explicit --bootstrap addresses */
+    for (int i = 0; i < g_args.bootstrap_count; i++) {
+        if (ping_host_port(g_args.bootstrap[i]) == 0) {
+            fprintf(stderr, "[dht44:daemon] bootstrap ping → %s\n",
+                    g_args.bootstrap[i]);
+        } else {
+            fprintf(stderr, "[dht44:daemon] bootstrap ping FAILED → %s\n",
+                    g_args.bootstrap[i]);
+        }
+    }
+
     if (!g_args.no_upnp) {
         upnp_init(g_args.port, (uint32_t)g_args.upnp_lifetime);
     }
@@ -883,6 +933,7 @@ cmd_daemon(int argc, char **argv)
     time_t next_republish = time(NULL) + (time_t)g_args.republish_min * 60;
     time_t next_upnp     = time(NULL) + 30 * 60;
     time_t next_status   = time(NULL) + 30;
+    time_t next_bootstrap_retry = time(NULL) + 2;
     time_t booted_at     = time(NULL);
     int    bootstrap_pinged = 0;
     int    last_good = -1;
@@ -975,11 +1026,24 @@ cmd_daemon(int argc, char **argv)
         if (!bootstrap_pinged && time(NULL) - booted_at >= 3) {
             int g = 0, d = 0;
             dht_wrap_status(&g, &d);
-            if (g < 4) {
+            if (g < 4 && !g_args.no_routers) {
                 fprintf(stderr, "[dht44:daemon] sparse table (good=%d dub=%d), pinging routers\n", g, d);
                 dht_wrap_ping_routers();
             }
             bootstrap_pinged = 1;
+        }
+        /* Re-ping --bootstrap addresses while we still have no good peers.
+         * The first ping at boot can lose the race against a sibling daemon's
+         * bind on a shared host. Retry every 2 s until we have anyone. */
+        if (g_args.bootstrap_count > 0 && time(NULL) >= next_bootstrap_retry) {
+            int g = 0, d = 0;
+            dht_wrap_status(&g, &d);
+            if (g + d == 0) {
+                for (int i = 0; i < g_args.bootstrap_count; i++) {
+                    ping_host_port(g_args.bootstrap[i]);
+                }
+            }
+            next_bootstrap_retry = time(NULL) + 2;
         }
 
         time_t now = time(NULL);
