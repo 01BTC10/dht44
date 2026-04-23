@@ -226,12 +226,14 @@ client_close(int idx)
 static int
 send_ipc_dict(ipc_conn *c, const uint8_t *buf, size_t len)
 {
+    if (!c) return -1;
     return ipc_conn_send(c, buf, len);
 }
 
 static void
 send_ipc_error(ipc_conn *c, const char *msg)
 {
+    if (!c) return;     /* client may already have been closed by a sync cb */
     uint8_t buf[256];
     bencode_writer w;
     bencode_writer_init(&w, buf, sizeof(buf));
@@ -360,6 +362,9 @@ on_put_lookup_done(int rc,
     if (!p->in_use) return;
 
     if (token_count == 0) {
+        char tgthex[17]; hex8(tgthex, p->target);
+        fprintf(stderr,
+                "[dht44:daemon] put target=%s.. → 0 tokens (no peers)\n", tgthex);
         put_ctx_complete(p);
         return;
     }
