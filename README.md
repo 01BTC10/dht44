@@ -1,0 +1,83 @@
+# dht44
+
+CLI for storing and retrieving [BEP 44](https://www.bittorrent.org/beps/bep_0044.html)
+items (mutable + immutable) on the BitTorrent Mainline DHT, in C.
+
+Built on [`jech/dht`](https://github.com/jech/dht) (Kademlia substrate, vendored at
+`vendor/jech-dht/`). Ed25519 via libsodium, SHA-1 via OpenSSL EVP, NAT traversal
+via miniupnpc.
+
+## Architecture
+
+Client/daemon split. The daemon owns the UDP socket, routing table, and lookup
+engine, and runs continuously. The CLI is a thin client over a UNIX socket
+(`~/.dht44/sock`, mode 0700, bencode-framed). Secret keys never leave the CLI —
+puts are signed locally and the signed bytes are handed to the daemon to relay.
+
+```
+$ dht44 daemon &                       # long-running, owns the DHT node
+$ dht44 keygen -o ~/.dht44/key.bin     # local, no network
+$ dht44 put -k ~/.dht44/key.bin --seq 1 --string "hello"
+$ dht44 get -k ~/.dht44/key.bin
+hello
+```
+
+## Build (Arch Linux)
+
+```sh
+sudo pacman -S libsodium openssl miniupnpc
+git clone --recurse-submodules ssh://git@ds1621.tail7aed4e.ts.net:4022/r2d2/bep44_dht.git
+cd bep44_dht
+make
+```
+
+If you cloned without `--recurse-submodules`:
+```sh
+git submodule update --init --recursive
+```
+
+## Commands
+
+| Command | Description | Needs daemon |
+|---|---|---|
+| `keygen -o KEYFILE` | Generate Ed25519 keypair | no |
+| `pubkey -k KEYFILE` | Print pubkey hex | no |
+| `target -k KEYFILE [--salt S]` | Print BEP 44 target hex | no |
+| `put -k KEYFILE [--salt S] --seq N [--cas M] [--bencode\|--string] VALUE` | Store mutable item | yes |
+| `put-immutable [--bencode\|--string] VALUE` | Store immutable item | yes |
+| `get --target HEX` | Retrieve immutable item by target | yes |
+| `get -k KEYFILE [--salt S]` | Retrieve mutable item (own key) | yes |
+| `get --pubkey HEX [--salt S]` | Retrieve mutable item (third-party) | yes |
+| `daemon [--port N] [--republish MIN] [--no-upnp] [--upnp-lifetime SEC]` | Run long-lived node | — |
+
+Exit codes: `0` success, `1` usage, `2` network/timeout, `3` crypto verify failure,
+`4` DHT reject (with err code printed), `5` no daemon running.
+
+## State directory
+
+`~/.dht44/` (mode 0700):
+- `key.bin` — Ed25519 secret key, mode 0600.
+- `node_id.bin` — 20 B persistent DHT node ID.
+- `nodes.bin` — compact node list for warm start.
+- `items/<hex-target>.bin` — daemon's republish queue.
+- `sock` — IPC UNIX socket (daemon-owned).
+- `lock` — `flock`-based daemon mutex.
+
+## Layout
+
+See [`CLAUDE.md`](CLAUDE.md) for the full design and protocol notes.
+
+```
+bep44_dht/
+├── README.md
+├── CLAUDE.md           ← design + protocol notes
+├── Makefile
+├── src/                ← project code (one CLAUDE.md inside)
+├── tests/              ← unit + integration tests
+└── vendor/jech-dht/    ← submodule, vendored as-is
+```
+
+## License
+
+Project: see top-level `LICENSE` (TBD).
+`vendor/jech-dht/` retains its upstream MIT license.

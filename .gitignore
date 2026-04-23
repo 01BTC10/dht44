@@ -1,0 +1,13 @@
+# build artifacts
+*.o
+dht44
+
+# test binaries
+tests/test_*
+!tests/test_*.c
+!tests/test_*.h
+
+# editor/scratch
+*.swp
+*~
+.DS_Store
