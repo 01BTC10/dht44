@@ -7,9 +7,9 @@
 
 #include "bep44.h"
 
-#define LOOKUP_ALPHA       3        /* in-flight queries per lookup */
-#define LOOKUP_TOP_K       8        /* termination: top-k responded */
-#define LOOKUP_SHORTLIST  24        /* candidate cap */
+#define LOOKUP_ALPHA       8        /* in-flight queries per lookup */
+#define LOOKUP_TOP_K      20        /* termination: top-k responded (libtorrent uses 20) */
+#define LOOKUP_SHORTLIST  64        /* candidate cap */
 #define LOOKUP_MAX_VALUES  4        /* keep at most this many distinct values */
 #define LOOKUP_MAX_CONCURRENT 8
 
