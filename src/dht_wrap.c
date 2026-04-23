@@ -466,6 +466,25 @@ dht_wrap_get_nodes(struct sockaddr_in *out, int max)
     return n;
 }
 
+int
+dht_wrap_closest_to(const uint8_t target[20],
+                    struct sockaddr_in *out,
+                    uint8_t (*out_ids)[20],
+                    int max)
+{
+    if (!s_initialised || max <= 0) return 0;
+    return dht_closest_nodes(target, AF_INET, out, NULL, out_ids, max);
+}
+
+int
+dht_wrap_kick_search(const uint8_t target[20])
+{
+    if (!s_initialised) return -1;
+    /* port=0 means don't announce_peer on completion; we just want the
+     * find_node / get_peers iterations to populate our routing table. */
+    return dht_search(target, 0, AF_INET, NULL, NULL);
+}
+
 /* ============================================================
  * BEP 44 dispatch (inbound)
  * ============================================================ */

@@ -63,10 +63,26 @@ void dht_wrap_status(int *good, int *dubious);
 
 /*
  * Dump up to `max` IPv4 nodes from jech's routing table into `out`. Returns
- * the number written. Used to seed our own iterative lookups and to persist
- * nodes.bin for warm restart.
+ * the number written. Used to persist nodes.bin for warm restart.
  */
 int dht_wrap_get_nodes(struct sockaddr_in *out, int max);
+
+/*
+ * Return up to `max` good IPv4 nodes from jech's routing table, sorted by
+ * XOR distance to `target` (closest first). out[i] paired with out_ids[i].
+ */
+int dht_wrap_closest_to(const uint8_t target[20],
+                        struct sockaddr_in *out,
+                        uint8_t (*out_ids)[20],
+                        int max);
+
+/*
+ * Kick off jech's own iterative search toward `target`. Fire-and-forget;
+ * jech's internal find_node / get_peers iterations will populate the routing
+ * table with peers near the target. Used as a pre-step in lookup_start so
+ * subsequent dht_wrap_closest_to calls see a well-populated neighborhood.
+ */
+int dht_wrap_kick_search(const uint8_t target[20]);
 
 /* ================================================================
  * Event pump

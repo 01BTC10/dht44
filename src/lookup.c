@@ -493,12 +493,33 @@ lookup_start(const uint8_t target[BEP44_TARGET_LEN],
     L->closure = closure;
     L->deadline = time(NULL) + (timeout_ms + 999) / 1000;
 
-    /* Seed shortlist from jech's table. We don't know ids; insertion sort
-     * places them at the end. They'll be re-sorted as we learn ids. */
-    struct sockaddr_in seed[LOOKUP_TOP_K];
-    int n = dht_wrap_get_nodes(seed, LOOKUP_TOP_K);
+    /*
+     * Kick jech's own iterative find_node/get_peers search toward target so
+     * closer peers flow into the routing table in parallel with our BEP 44
+     * iteration. Fire-and-forget — we'll pick up newly-discovered peers by
+     * re-seeding during send_more.
+     */
+    dht_wrap_kick_search(target);
+
+    /*
+     * Seed shortlist from jech's routing table, target-sorted so the
+     * closest-by-XOR nodes (with their ids) end up at the head. This fixes
+     * cross-daemon convergence: two daemons querying the same target now
+     * start from (approximately) the same neighborhood instead of each
+     * daemon's own-bucket view.
+     */
+    struct sockaddr_in seed[LOOKUP_SHORTLIST];
+    uint8_t seed_ids[LOOKUP_SHORTLIST][BEP44_NODE_ID_LEN];
+    int n = dht_wrap_closest_to(target, seed, seed_ids, LOOKUP_SHORTLIST);
     for (int i = 0; i < n; i++) {
-        shortlist_insert(L, NULL, &seed[i]);
+        shortlist_insert(L, seed_ids[i], &seed[i]);
+    }
+    /* Fallback: if the target-sorted call returned nothing (very early
+     * boot), seed from whatever is in the table without ids. */
+    if (n == 0) {
+        int m = dht_wrap_get_nodes(seed, LOOKUP_TOP_K);
+        for (int i = 0; i < m; i++) shortlist_insert(L, NULL, &seed[i]);
+        n = m;
     }
     if (lookup_verbose()) {
         char hex[BEP44_TARGET_LEN * 2 + 1];
@@ -507,7 +528,7 @@ lookup_start(const uint8_t target[BEP44_TARGET_LEN],
             hex[i*2] = d[target[i] >> 4]; hex[i*2+1] = d[target[i] & 0xf];
         }
         hex[BEP44_TARGET_LEN*2] = 0;
-        LDBG("[lookup] START target=%s seeded=%d\n", hex, n);
+        LDBG("[lookup] START target=%s seeded=%d (target-sorted)\n", hex, n);
     }
     if (L->shortlist_count == 0) {
         /* nothing to query — finish immediately as a no-op */
