@@ -626,6 +626,48 @@ op_get(int client_idx, const bencode_value *req)
         client_close(client_idx);
         return;
     }
+    int is_mutable = (mut && mut->type == BENCODE_INT && mut->i != 0);
+
+    uint8_t target_buf[BEP44_TARGET_LEN];
+    memcpy(target_buf, target->str.bytes, BEP44_TARGET_LEN);
+
+    /*
+     * Short-circuit: if WE persisted this target via a prior put, return
+     * the stored copy immediately. Avoids a full network lookup (which
+     * may converge to a different set of peers than the put hit) and
+     * makes "put then immediately get on the same daemon" reliable.
+     */
+    stored_item si = {0};
+    if (state_load_item(target_buf, &si) == 0
+        && si.mutable_ == is_mutable) {
+        char tgthex[17]; hex8(tgthex, target_buf);
+        fprintf(stderr,
+                "[dht44:daemon] get target=%s.. served from local store\n",
+                tgthex);
+        uint8_t buf[2048];
+        bencode_writer w;
+        bencode_writer_init(&w, buf, sizeof(buf));
+        bencode_dict_open(&w);
+            bencode_cstr(&w, "found"); bencode_int(&w, 1);
+            if (is_mutable) {
+                bencode_cstr(&w, "k");   bencode_str(&w, si.pk, BEP44_PK_LEN);
+                bencode_cstr(&w, "ok");  bencode_int(&w, 1);
+                bencode_cstr(&w, "seq"); bencode_int(&w, si.seq);
+                bencode_cstr(&w, "sig"); bencode_str(&w, si.sig, BEP44_SIG_LEN);
+                bencode_cstr(&w, "v");   bencode_str(&w, si.v, si.v_len);
+            } else {
+                bencode_cstr(&w, "ok"); bencode_int(&w, 1);
+                bencode_cstr(&w, "v");  bencode_str(&w, si.v, si.v_len);
+            }
+        bencode_dict_close(&w);
+        ssize_t n = bencode_writer_finish(&w);
+        if (n > 0 && g_clients[client_idx]) {
+            send_ipc_dict(g_clients[client_idx], buf, (size_t)n);
+        }
+        client_close(client_idx);
+        return;
+    }
+
     get_ctx *g = get_ctx_alloc();
     if (!g) {
         send_ipc_error(g_clients[client_idx], "too many in-flight gets");
@@ -633,10 +675,8 @@ op_get(int client_idx, const bencode_value *req)
         return;
     }
     g->client_idx = client_idx;
-    g->mutable_ = (mut && mut->type == BENCODE_INT && mut->i != 0);
+    g->mutable_ = is_mutable;
 
-    uint8_t target_buf[BEP44_TARGET_LEN];
-    memcpy(target_buf, target->str.bytes, BEP44_TARGET_LEN);
     if (lookup_start(target_buf, 15000, on_get_lookup_done, g) == NULL) {
         send_ipc_error(g_clients[client_idx], "lookup_start failed");
         get_ctx_release(g);
