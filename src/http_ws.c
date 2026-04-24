@@ -125,6 +125,98 @@ geoip_lookup(const char *ip)
     return o;
 }
 
+/* Small open-addressed table: ISO2 → count. We don't expect > 300 countries. */
+#define COUNTRY_TABLE_SZ 512
+struct country_bucket { char iso[3]; int64_t count; };
+
+static int
+aggregate_country_cb(const char *ip, void *closure)
+{
+    struct country_bucket *tbl = closure;
+    if (!g_city_ok) return 0;
+    struct sockaddr_in sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sin_family = AF_INET;
+    if (inet_pton(AF_INET, ip, &sa.sin_addr) != 1) return 0;
+    int gai = 0;
+    MMDB_lookup_result_s r =
+        MMDB_lookup_sockaddr(&g_city, (struct sockaddr *)&sa, &gai);
+    if (!r.found_entry) return 0;
+    MMDB_entry_data_s e;
+    const char *p_iso[] = { "country", "iso_code", NULL };
+    if (MMDB_aget_value(&r.entry, &e, p_iso) != MMDB_SUCCESS
+        || !e.has_data || e.type != MMDB_DATA_TYPE_UTF8_STRING) return 0;
+    char iso[3] = { 0 };
+    size_t l = e.data_size < 2 ? e.data_size : 2;
+    memcpy(iso, e.utf8_string, l);
+    iso[l] = 0;
+
+    /* Linear probe — tiny N, near-O(1) in practice. */
+    unsigned h = ((unsigned)iso[0] * 31u + (unsigned)iso[1]) % COUNTRY_TABLE_SZ;
+    for (unsigned i = 0; i < COUNTRY_TABLE_SZ; i++) {
+        unsigned slot = (h + i) % COUNTRY_TABLE_SZ;
+        if (tbl[slot].count == 0) {
+            memcpy(tbl[slot].iso, iso, 3);
+            tbl[slot].count = 1;
+            return 0;
+        }
+        if (memcmp(tbl[slot].iso, iso, 2) == 0) {
+            tbl[slot].count++;
+            return 0;
+        }
+    }
+    return 0;
+}
+
+static char *
+country_stats_json(int limit)
+{
+    if (!g_city_ok) {
+        return strdup("{\"clients\":[],\"total\":0,\"known\":0,\"unknown\":0,"
+                      "\"note\":\"no geoip city db loaded\"}");
+    }
+    if (limit <= 0 || limit > 500) limit = 50;
+    struct country_bucket *tbl = calloc(COUNTRY_TABLE_SZ, sizeof(*tbl));
+    if (!tbl) return NULL;
+    db_foreach_peer_ip(aggregate_country_cb, tbl);
+
+    /* Collect non-empty buckets into an array and sort desc by count. */
+    struct country_bucket tmp[COUNTRY_TABLE_SZ];
+    int n = 0;
+    for (unsigned i = 0; i < COUNTRY_TABLE_SZ; i++) {
+        if (tbl[i].count > 0) tmp[n++] = tbl[i];
+    }
+    free(tbl);
+    /* simple insertion sort is fine for n<300 */
+    for (int i = 1; i < n; i++) {
+        struct country_bucket v = tmp[i];
+        int j = i - 1;
+        while (j >= 0 && tmp[j].count < v.count) { tmp[j+1] = tmp[j]; j--; }
+        tmp[j+1] = v;
+    }
+
+    int64_t known = 0;
+    for (int i = 0; i < n; i++) known += tmp[i].count;
+    int64_t total = db_count_peers();
+
+    json_t *arr = json_array();
+    int cap = n < limit ? n : limit;
+    for (int i = 0; i < cap; i++) {
+        json_t *o = json_object();
+        json_object_set_new(o, "iso",   json_string(tmp[i].iso));
+        json_object_set_new(o, "count", json_integer(tmp[i].count));
+        json_array_append_new(arr, o);
+    }
+    json_t *env = json_object();
+    json_object_set_new(env, "total",     json_integer(total));
+    json_object_set_new(env, "known",     json_integer(known));
+    json_object_set_new(env, "unknown",   json_integer(total - known));
+    json_object_set_new(env, "countries", arr);
+    char *js = json_dumps(env, JSON_COMPACT);
+    json_decref(env);
+    return js;
+}
+
 /* Wrap a JSON array of peer rows with geoip annotations on each. */
 static char *
 peers_with_geoip(int limit, const char *order)
@@ -458,6 +550,18 @@ dispatch_http(struct lws *wsi)
     }
     if (strcmp(uri, "/api/stats") == 0) {
         char *body = db_select_stats_json();
+        int rc = send_json_response(wsi, body ? body : "{}");
+        free(body);
+        return rc;
+    }
+    if (strcmp(uri, "/api/client-stats") == 0) {
+        char *body = db_select_client_stats_json(limit);
+        int rc = send_json_response(wsi, body ? body : "{}");
+        free(body);
+        return rc;
+    }
+    if (strcmp(uri, "/api/country-stats") == 0) {
+        char *body = country_stats_json(limit);
         int rc = send_json_response(wsi, body ? body : "{}");
         free(body);
         return rc;

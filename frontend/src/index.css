@@ -51,3 +51,49 @@ td.newrow { animation: flash 1.8s ease-out; }
   padding: 5px 10px; font: inherit; width: 260px; border-radius: 2px;
 }
 .small { color: #556066; font-size: 11px; }
+.dim   { color: #556066; }
+
+.panels {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+  margin: 0 0 14px 0;
+}
+.panel {
+  background: #14181d;
+  border: 1px solid #232a31;
+  border-radius: 3px;
+  padding: 8px 12px 10px 12px;
+  min-width: 0;
+}
+.panel h3 {
+  margin: 0 0 6px 0;
+  font-size: 12px;
+  color: #8fc0ff;
+  font-weight: normal;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+}
+.panel h3 .small { margin-left: 8px; text-transform: none; letter-spacing: 0; }
+.bars { list-style: none; padding: 0; margin: 0; }
+.bars li {
+  display: grid;
+  grid-template-columns: 1fr 60px;
+  align-items: center;
+  padding: 2px 0;
+  position: relative;
+  font-size: 12px;
+}
+.bars .bar {
+  position: absolute;
+  left: 0;
+  top: 2px;
+  bottom: 2px;
+  background: rgba(143, 192, 255, 0.18);
+  border-left: 2px solid #8fc0ff;
+  z-index: 0;
+}
+.bars .bar.cc { background: rgba(224, 166, 72, 0.22); border-left-color: #e0a648; }
+.bars .lbl { position: relative; padding: 1px 6px; z-index: 1; color: #d8dee6;
+             white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bars .n { position: relative; text-align: right; color: #8fc0ff; z-index: 1; padding-right: 6px; }

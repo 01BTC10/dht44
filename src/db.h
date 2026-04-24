@@ -70,6 +70,14 @@ char *db_select_infohashes_json(int limit);
 char *db_select_bep44_json(int limit);
 char *db_select_stats_json(void);
 
+/* Aggregate peer count by v_string (BEP 20 client id). Returns a JSON array
+ * [ { "v_string": "<hex|null>", "count": N }, ... ] ordered desc by count. */
+char *db_select_client_stats_json(int limit);
+
+/* Enumerate every (ip, port) peer row; cb returns nonzero to stop early.
+ * Used by http_ws to aggregate by GeoIP country at read time. */
+int db_foreach_peer_ip(int (*cb)(const char *ip, void *closure), void *closure);
+
 /* Count of rows in each table (for heartbeat stats). */
 int64_t db_count_peers(void);
 int64_t db_count_queries(void);

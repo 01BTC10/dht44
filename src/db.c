@@ -504,6 +504,65 @@ int64_t db_count_infohashes(void) { return scalar_i64("SELECT COUNT(*) FROM info
 int64_t db_count_bep44(void)      { return scalar_i64("SELECT COUNT(*) FROM bep44_items"); }
 
 char *
+db_select_client_stats_json(int limit)
+{
+    if (!g_db) return NULL;
+    if (limit <= 0 || limit > 500) limit = 50;
+
+    /* Count rows: known (non-null v_string), unknown (null), total. */
+    int64_t total   = db_count_peers();
+    int64_t unknown = scalar_i64(
+        "SELECT COUNT(*) FROM peers WHERE v_string IS NULL");
+
+    sqlite3_stmt *s = NULL;
+    const char *sql =
+        "SELECT v_string, COUNT(*) c FROM peers"
+        " WHERE v_string IS NOT NULL"
+        " GROUP BY v_string ORDER BY c DESC LIMIT ?";
+    if (sqlite3_prepare_v2(g_db, sql, -1, &s, NULL) != SQLITE_OK) {
+        log_err("prepare client-stats"); return NULL;
+    }
+    sqlite3_bind_int(s, 1, limit);
+
+    json_t *arr = json_array();
+    while (sqlite3_step(s) == SQLITE_ROW) {
+        json_t *o = json_object();
+        json_set_blob_hex(o, "v_string",
+                          sqlite3_column_blob(s, 0), sqlite3_column_bytes(s, 0));
+        json_object_set_new(o, "count", json_integer(sqlite3_column_int64(s, 1)));
+        json_array_append_new(arr, o);
+    }
+    sqlite3_finalize(s);
+
+    json_t *env = json_object();
+    json_object_set_new(env, "total",     json_integer(total));
+    json_object_set_new(env, "known",     json_integer(total - unknown));
+    json_object_set_new(env, "unknown",   json_integer(unknown));
+    json_object_set_new(env, "clients",   arr);
+    char *js = json_dumps(env, JSON_COMPACT);
+    json_decref(env);
+    return js;
+}
+
+int
+db_foreach_peer_ip(int (*cb)(const char *ip, void *closure), void *closure)
+{
+    if (!g_db || !cb) return -1;
+    sqlite3_stmt *s = NULL;
+    if (sqlite3_prepare_v2(g_db, "SELECT ip FROM peers", -1, &s, NULL)
+            != SQLITE_OK) {
+        log_err("prepare foreach_peer_ip"); return -1;
+    }
+    int stop = 0;
+    while (!stop && sqlite3_step(s) == SQLITE_ROW) {
+        const char *ip = (const char *)sqlite3_column_text(s, 0);
+        if (ip && cb(ip, closure) != 0) stop = 1;
+    }
+    sqlite3_finalize(s);
+    return 0;
+}
+
+char *
 db_select_stats_json(void)
 {
     if (!g_db) return NULL;
