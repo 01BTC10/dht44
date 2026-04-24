@@ -97,10 +97,10 @@ export default function Graph() {
       const a_ = alpha.current;
 
       /* Spatial grid for O(n) repulsion: each node only pushes against
-       * neighbours in its own cell + the 8 adjacent cells. Cell size is
-       * deliberately a bit larger than the rest length so the neighbourhood
-       * covers "anything close enough to repel meaningfully". */
-      const CELL = 140;
+       * neighbours in its own cell + the 8 adjacent cells. A larger cell
+       * means clusters feel each other from further away and drift apart
+       * instead of bunching in the middle. */
+      const CELL = 260;
       const cells = new Map<string, Node[]>();
       for (const n of nodes) {
         const k = Math.floor(n.x / CELL) + "," + Math.floor(n.y / CELL);
@@ -110,9 +110,9 @@ export default function Graph() {
       }
 
       /* Scale repulsion strength down with density so big graphs don't blow
-       * up. At 1000 nodes the per-node force sum is already ~20× a 100-node
-       * graph even with the grid — so temper the constant. */
-      const REP = 900 * Math.min(1, 200 / Math.max(50, nodes.length));
+       * up. Base strength is higher than before so inter-cluster spacing is
+       * visible. */
+      const REP = 2200 * Math.min(1, 250 / Math.max(50, nodes.length));
 
       for (const n of nodes) {
         const gx = Math.floor(n.x / CELL), gy = Math.floor(n.y / CELL);
@@ -135,22 +135,25 @@ export default function Graph() {
         }
       }
 
-      /* springs along edges */
+      /* Springs along edges. Stronger pull so connected peers form tighter
+       * groups — combined with the larger repulsion range above, this makes
+       * clusters clearly separate from each other. */
       for (const e of links) {
         const a = byId.get(e.src), b = byId.get(e.dst);
         if (!a || !b) continue;
         const dx = b.x - a.x, dy = b.y - a.y;
         const d  = Math.sqrt(dx * dx + dy * dy) || 1;
-        const target = 55;
-        const f = (d - target) * 0.04 * a_;
+        const target = 70;
+        const f = (d - target) * 0.08 * a_;
         const fx = (dx / d) * f, fy = (dy / d) * f;
         a.vx += fx; a.vy += fy;
         b.vx -= fx; b.vy -= fy;
       }
-      /* gravity toward origin */
+      /* Mild gravity — just enough to keep things on-screen; doesn't drag
+       * the whole graph into a single blob. */
       for (const n of nodes) {
-        n.vx -= n.x * 0.002 * a_;
-        n.vy -= n.y * 0.002 * a_;
+        n.vx -= n.x * 0.0006 * a_;
+        n.vy -= n.y * 0.0006 * a_;
       }
       /* integrate with damping + hard velocity cap to prevent runaway */
       const drag = mouse.current.dragNode;
@@ -306,7 +309,10 @@ export default function Graph() {
 
       <div
         ref={wrapRef}
-        style={{ position: "relative", width: "100%", height: "72vh",
+        style={{ position: "relative", width: "100%",
+                 /* fill the remaining viewport: viewport minus everything
+                  * above (app header, stats bar, tab nav, graph toolbar). */
+                 height: "calc(100vh - 170px)",
                  background: "#0a0c0f", border: "1px solid #232a31",
                  borderRadius: 3, overflow: "hidden" }}
       >
