@@ -100,7 +100,7 @@ export default function Graph() {
        * neighbours in its own cell + the 8 adjacent cells. A larger cell
        * means clusters feel each other from further away and drift apart
        * instead of bunching in the middle. */
-      const CELL = 260;
+      const CELL = 320;
       const cells = new Map<string, Node[]>();
       for (const n of nodes) {
         const k = Math.floor(n.x / CELL) + "," + Math.floor(n.y / CELL);
@@ -110,9 +110,9 @@ export default function Graph() {
       }
 
       /* Scale repulsion strength down with density so big graphs don't blow
-       * up. Base strength is higher than before so inter-cluster spacing is
-       * visible. */
-      const REP = 2200 * Math.min(1, 250 / Math.max(50, nodes.length));
+       * up. The base strength is high so non-connected peers actually push
+       * each other apart across cluster boundaries. */
+      const REP = 5500 * Math.min(1, 300 / Math.max(50, nodes.length));
 
       for (const n of nodes) {
         const gx = Math.floor(n.x / CELL), gy = Math.floor(n.y / CELL);
@@ -135,25 +135,34 @@ export default function Graph() {
         }
       }
 
-      /* Springs along edges. Stronger pull so connected peers form tighter
-       * groups — combined with the larger repulsion range above, this makes
-       * clusters clearly separate from each other. */
+      /* Springs along edges. Weaker than before: a single cross-cluster edge
+       * won't yank two whole clusters together, but dense clusters still pull
+       * their members into a readable ball. */
       for (const e of links) {
         const a = byId.get(e.src), b = byId.get(e.dst);
         if (!a || !b) continue;
         const dx = b.x - a.x, dy = b.y - a.y;
         const d  = Math.sqrt(dx * dx + dy * dy) || 1;
-        const target = 70;
-        const f = (d - target) * 0.08 * a_;
+        const target = 80;
+        const f = (d - target) * 0.025 * a_;
         const fx = (dx / d) * f, fy = (dy / d) * f;
         a.vx += fx; a.vy += fy;
         b.vx -= fx; b.vy -= fy;
       }
-      /* Mild gravity — just enough to keep things on-screen; doesn't drag
-       * the whole graph into a single blob. */
+      /* Bounded gravity: zero pull inside the comfort radius, a gentle
+       * centripetal force only when a node drifts outside. Clusters can
+       * spread freely until they reach the boundary, which prevents the
+       * "everything collapses to origin" problem without letting the graph
+       * escape the viewport. */
+      const COMFORT = 600;
       for (const n of nodes) {
-        n.vx -= n.x * 0.0006 * a_;
-        n.vy -= n.y * 0.0006 * a_;
+        const r2 = n.x * n.x + n.y * n.y;
+        if (r2 > COMFORT * COMFORT) {
+          const r = Math.sqrt(r2);
+          const pull = (r - COMFORT) * 0.004 * a_;
+          n.vx -= (n.x / r) * pull;
+          n.vy -= (n.y / r) * pull;
+        }
       }
       /* integrate with damping + hard velocity cap to prevent runaway */
       const drag = mouse.current.dragNode;
