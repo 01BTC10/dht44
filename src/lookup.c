@@ -24,6 +24,7 @@
 #include "bencode.h"
 #include "bep44.h"
 #include "dht_wrap.h"
+#include "observe.h"
 
 static int lookup_verbose(void) {
     static int v = -1;
@@ -55,6 +56,7 @@ struct query_slot {
     lookup_run *L;
     int         node_idx;
     int         in_use;
+    struct timeval send_tv;     /* wall-clock at send, for RTT */
 };
 
 struct lookup_run {
@@ -290,6 +292,7 @@ send_to(lookup_run *L, int node_idx)
     }
     n->state = NODE_INFLIGHT;
     L->in_flight++;
+    gettimeofday(&slot->send_tv, NULL);
 
     if (lookup_verbose()) {
         char ip[INET_ADDRSTRLEN];
@@ -408,6 +411,16 @@ on_tx(bep44_tx_event ev,
     int node_idx = slot ? slot->node_idx : -1;
     if (!L) return;
 
+    /* RTT sample (milliseconds) — computed before slot_release. */
+    int rtt_ms = -1;
+    if (slot && ev == BEP44_TX_RESPONSE && slot->send_tv.tv_sec) {
+        struct timeval now;
+        gettimeofday(&now, NULL);
+        long dms = (now.tv_sec - slot->send_tv.tv_sec) * 1000
+                 + (now.tv_usec - slot->send_tv.tv_usec) / 1000;
+        if (dms >= 0 && dms < 60000) rtt_ms = (int)dms;
+    }
+
     if (L->in_flight > 0) L->in_flight--;
     if (slot) slot_release(slot);
 
@@ -424,6 +437,45 @@ on_tx(bep44_tx_event ev,
             memcpy(L->shortlist[node_idx].id, id->str.bytes, BEP44_NODE_ID_LEN);
             L->shortlist[node_idx].has_id = 1;
             shortlist_resort(L);
+        }
+
+        if (observe_enabled()) {
+            const struct sockaddr_in *p4 = (const struct sockaddr_in *)peer;
+            if (rtt_ms >= 0) observe_rtt(p4, rtt_ms);
+            if (id && id->type == BENCODE_STR
+                && id->str.len == BEP44_NODE_ID_LEN) {
+                /* enrich peer with node_id via a zero-delta upsert */
+                extern void db_upsert_peer(const struct sockaddr_in *,
+                    const uint8_t *, int, const uint8_t *, size_t,
+                    int, int, int, char);
+                db_upsert_peer(p4, id->str.bytes, 1, NULL, 0, -1, -1, -1, 0);
+            }
+            /* Archive any BEP 44 item we just learned (mutable tuples). */
+            const bencode_value *vv  = bencode_dict_get(r, "v");
+            const bencode_value *kk  = bencode_dict_get(r, "k");
+            const bencode_value *sq  = bencode_dict_get(r, "seq");
+            const bencode_value *sg  = bencode_dict_get(r, "sig");
+            if (vv && vv->type == BENCODE_STR) {
+                uint8_t venc[BEP44_MAX_V + 16];
+                bencode_writer w;
+                bencode_writer_init(&w, venc, sizeof(venc));
+                bencode_str(&w, vv->str.bytes, vv->str.len);
+                ssize_t vlen = bencode_writer_finish(&w);
+                if (vlen > 0) {
+                    int mut = (kk && kk->type == BENCODE_STR
+                               && kk->str.len == BEP44_PK_LEN
+                               && sg && sg->type == BENCODE_STR
+                               && sg->str.len == BEP44_SIG_LEN
+                               && sq && sq->type == BENCODE_INT) ? 1 : 0;
+                    observe_bep44_item(
+                        L->target, mut,
+                        mut ? kk->str.bytes : NULL, mut ? (size_t)kk->str.len : 0,
+                        NULL, 0,
+                        mut ? sq->i : 0,
+                        mut ? sg->str.bytes : NULL, mut ? (size_t)sg->str.len : 0,
+                        venc, (size_t)vlen);
+                }
+            }
         }
 
         const bencode_value *nodes = bencode_dict_get(r, "nodes");

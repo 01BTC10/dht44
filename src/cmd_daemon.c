@@ -32,9 +32,13 @@
 #include "bencode.h"
 #include "bep44.h"
 #include "commands.h"
+#include "crawl.h"
+#include "db.h"
 #include "dht_wrap.h"
+#include "http_ws.h"
 #include "ipc.h"
 #include "lookup.h"
+#include "observe.h"
 #include "state.h"
 #include "upnp.h"
 
@@ -52,12 +56,26 @@ typedef struct {
     int      no_routers;            /* skip pinging public bootstrap routers */
     const char *bootstrap[MAX_BOOTSTRAP];
     int      bootstrap_count;
+
+    /* crawler */
+    int      crawl;                 /* 0 = passive, 1 = active crawl workers */
+    int      crawl_workers;
+    int      crawl_pps;             /* outbound pkts/sec cap */
+
+    /* web + geoip */
+    uint16_t web_port;              /* 0 = web disabled */
+    const char *web_static;         /* NULL = built-in UI */
+    const char *geoip_city;         /* NULL = none */
+    const char *geoip_asn;          /* NULL = none */
 } daemon_args;
 
 static const char USAGE_DAEMON[] =
     "usage: dht44 daemon [--port N] [--republish MIN] [--no-upnp]\n"
     "                    [--upnp-lifetime SEC] [--bootstrap HOST:PORT]...\n"
-    "                    [--no-routers]\n";
+    "                    [--no-routers]\n"
+    "                    [--crawl] [--crawl-workers N] [--crawl-pps N]\n"
+    "                    [--web PORT] [--web-static DIR]\n"
+    "                    [--geoip-city PATH] [--geoip-asn PATH]\n";
 
 static int
 parse_args(int argc, char **argv, daemon_args *a)
@@ -66,6 +84,8 @@ parse_args(int argc, char **argv, daemon_args *a)
     a->port = 6881;
     a->republish_min = 60;
     a->upnp_lifetime = 3600;
+    a->crawl_workers = 8;
+    a->crawl_pps = 100;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--port") == 0 && i + 1 < argc) {
@@ -84,6 +104,20 @@ parse_args(int argc, char **argv, daemon_args *a)
                 return -1;
             }
             a->bootstrap[a->bootstrap_count++] = argv[++i];
+        } else if (strcmp(argv[i], "--crawl") == 0) {
+            a->crawl = 1;
+        } else if (strcmp(argv[i], "--crawl-workers") == 0 && i + 1 < argc) {
+            a->crawl_workers = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--crawl-pps") == 0 && i + 1 < argc) {
+            a->crawl_pps = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--web") == 0 && i + 1 < argc) {
+            a->web_port = (uint16_t)atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--web-static") == 0 && i + 1 < argc) {
+            a->web_static = argv[++i];
+        } else if (strcmp(argv[i], "--geoip-city") == 0 && i + 1 < argc) {
+            a->geoip_city = argv[++i];
+        } else if (strcmp(argv[i], "--geoip-asn") == 0 && i + 1 < argc) {
+            a->geoip_asn = argv[++i];
         } else {
             fputs(USAGE_DAEMON, stderr);
             return -1;
@@ -153,6 +187,14 @@ sa_str(const struct sockaddr *peer, char buf[24])
     inet_ntop(AF_INET, &p->sin_addr, ip, sizeof(ip));
     snprintf(buf, 24, "%s:%u", ip, ntohs(p->sin_port));
     return buf;
+}
+
+/* Bridge observe events to the WebSocket broadcaster. */
+static void
+ws_bridge(const char *topic, const char *json, void *closure)
+{
+    (void)closure;
+    http_ws_publish(topic, json);
 }
 
 static void
@@ -745,6 +787,8 @@ on_inbound_query(const struct sockaddr *peer, int peerlen,
     (void)closure; (void)peerlen;
     const struct sockaddr_in *p4 = (const struct sockaddr_in *)peer;
 
+    if (observe_enabled()) observe_query_fields(p4, is_put, a);
+
     if (!is_put) {
         /* GET — look up target in our items dir */
         const bencode_value *t = bencode_dict_get(a, "target");
@@ -938,6 +982,14 @@ on_inbound_query(const struct sockaddr *peer, int peerlen,
             return;
         }
         if (si.origin == ITEM_ORIGIN_PEER) g_items_stored_peer++;
+        if (observe_enabled()) {
+            observe_bep44_item(target_buf, 1,
+                               si.pk, BEP44_PK_LEN,
+                               si.salt_len ? si.salt : NULL, si.salt_len,
+                               si.seq,
+                               si.sig, BEP44_SIG_LEN,
+                               vb, (size_t)vb_len);
+        }
         fprintf(stderr,
                 "[dht44:daemon]    ACCEPTED (mut, %s, seq %lld%s)\n",
                 si.origin == ITEM_ORIGIN_SELF ? "self" : "peer",
@@ -961,6 +1013,11 @@ on_inbound_query(const struct sockaddr *peer, int peerlen,
             return;
         }
         g_items_stored_peer++;
+        if (observe_enabled()) {
+            observe_bep44_item(target_buf, 0,
+                               NULL, 0, NULL, 0, 0, NULL, 0,
+                               si.v, si.v_len);
+        }
         fprintf(stderr, "[dht44:daemon]    ACCEPTED (imm, peer)\n");
     }
 
@@ -1098,6 +1155,28 @@ cmd_daemon(int argc, char **argv)
     sigaction(SIGTERM, &sa, NULL);
     signal(SIGPIPE, SIG_IGN);
 
+    /* Observability: db + web + crawler. Enabled when --web or --crawl. */
+    int observe_wanted = (g_args.web_port > 0 || g_args.crawl);
+    if (observe_wanted) {
+        char home[512], dbpath[640];
+        if (state_home(home, sizeof(home)) == 0) {
+            snprintf(dbpath, sizeof(dbpath), "%s/observe.db", home);
+            if (db_open(dbpath) == 0) {
+                observe_set_enabled(1);
+            }
+        }
+    }
+    if (g_args.web_port > 0) {
+        http_ws_init(g_args.web_port, g_args.web_static);
+        if (g_args.geoip_city || g_args.geoip_asn) {
+            http_ws_set_geoip(g_args.geoip_city, g_args.geoip_asn);
+        }
+        observe_set_event_sink(ws_bridge, NULL);
+    }
+    if (g_args.crawl) {
+        crawl_start(g_args.crawl_workers, g_args.crawl_pps);
+    }
+
     fprintf(stderr, "[dht44:daemon] listening UDP :%u, IPC at $DHT44_HOME/sock\n",
             (unsigned)g_args.port);
 
@@ -1113,6 +1192,7 @@ cmd_daemon(int argc, char **argv)
     time_t booted_at     = time(NULL);
     int    bootstrap_pinged = 0;
     int    last_good = -1;
+    time_t next_flush    = time(NULL) + 1;      /* db + ws heartbeat */
 
     while (!g_exit) {
         int wrap_wake_ms = 1000;
@@ -1254,15 +1334,28 @@ cmd_daemon(int argc, char **argv)
             }
             next_status = now + 30;
         }
+
+        /* Crawler advance + db commit + ws heartbeat. crawl_tick is cheap
+         * enough to call every loop; db_flush + heartbeat run 1 Hz. */
+        crawl_tick();
+        http_ws_service(0);
+        if (now >= next_flush) {
+            db_flush();
+            http_ws_heartbeat();
+            next_flush = now + 1;
+        }
     }
 
     fprintf(stderr, "[dht44:daemon] shutting down\n");
+    crawl_stop();
     periodic_save_nodes();
     if (!g_args.no_upnp) upnp_shutdown();
     for (int i = 0; i < MAX_IPC_CLIENTS; i++) client_close(i);
     if (g_listen_fd >= 0) close(g_listen_fd);
     ipc_cleanup();
     dht_wrap_uninit();
+    http_ws_uninit();
+    db_close();
     sodium_memzero(g_token_secret, sizeof(g_token_secret));
     state_unlock(g_lock_fd);
     return 0;

@@ -28,6 +28,7 @@
 
 #include "bencode.h"
 #include "dht.h"
+#include "observe.h"
 #include "state.h"
 
 /* ============================================================
@@ -176,8 +177,9 @@ peek_string_at(const uint8_t *buf, size_t len, size_t pos,
 int
 dht_wrap_peek_top(const uint8_t *buf, size_t len, dht_wrap_peek *out)
 {
-    out->y = out->q = out->t = NULL;
-    out->y_len = out->q_len = out->t_len = 0;
+    out->y = out->q = out->t = out->v = NULL;
+    out->y_len = out->q_len = out->t_len = out->v_len = 0;
+    out->ro = -1;
     if (len < 2 || buf[0] != 'd') return -1;
 
     size_t pos = 1;
@@ -197,6 +199,7 @@ dht_wrap_peek_top(const uint8_t *buf, size_t len, dht_wrap_peek *out)
                 case 'y': slot = &out->y; slot_len = &out->y_len; break;
                 case 'q': slot = &out->q; slot_len = &out->q_len; break;
                 case 't': slot = &out->t; slot_len = &out->t_len; break;
+                case 'v': slot = &out->v; slot_len = &out->v_len; break;
             }
             if (slot) {
                 /* must be a string */
@@ -206,6 +209,20 @@ dht_wrap_peek_top(const uint8_t *buf, size_t len, dht_wrap_peek *out)
                     *slot = vbytes;
                     *slot_len = vlen;
                 }
+            }
+        } else if (klen == 2 && key[0] == 'r' && key[1] == 'o') {
+            /* "ro" — bencode integer "i0e" or "i1e" */
+            if (val_start < len && buf[val_start] == 'i'
+                && val_end > val_start + 2 && buf[val_end - 1] == 'e') {
+                size_t p = val_start + 1;
+                int neg = 0;
+                if (p < len && buf[p] == '-') { neg = 1; p++; }
+                long n = 0;
+                while (p < val_end - 1 && buf[p] >= '0' && buf[p] <= '9') {
+                    n = n * 10 + (buf[p] - '0');
+                    p++;
+                }
+                if (p == val_end - 1) out->ro = neg ? 0 : (n ? 1 : 0);
             }
         }
         pos = val_end;
@@ -596,6 +613,15 @@ dht_wrap_step(const void *buf, size_t buflen,
 
     int forward = 1;
     if (buf && buflen > 0) {
+        /* Observe every inbound packet before dispatch. */
+        if (observe_enabled() && fromlen == (int)sizeof(struct sockaddr_in)) {
+            dht_wrap_peek op;
+            if (dht_wrap_peek_top(buf, buflen, &op) == 0) {
+                observe_packet(OBSERVE_IN,
+                               (const struct sockaddr_in *)from,
+                               buf, buflen, &op);
+            }
+        }
         forward = !maybe_handle_bep44(buf, buflen, from, fromlen);
     }
 
@@ -635,6 +661,14 @@ dht_wrap_sendto(const struct sockaddr *peer, int peerlen,
     if (w < 0) {
         fprintf(stderr, "[dht44:dht_wrap] sendto: %s\n", strerror(errno));
         return -1;
+    }
+    if (observe_enabled() && peerlen == (int)sizeof(struct sockaddr_in)) {
+        dht_wrap_peek op;
+        if (dht_wrap_peek_top(packet, packet_len, &op) == 0) {
+            observe_packet(OBSERVE_OUT,
+                           (const struct sockaddr_in *)peer,
+                           packet, packet_len, &op);
+        }
     }
     return 0;
 }

@@ -11,3 +11,11 @@ tests/test_*
 *.swp
 *~
 .DS_Store
+
+# crawler runtime + frontend build
+log.txt
+/frontend/node_modules
+/frontend/dist
+
+# claude-code session metadata
+.claude/

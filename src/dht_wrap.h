@@ -19,6 +19,8 @@ typedef struct {
     const uint8_t *y; size_t y_len;
     const uint8_t *q; size_t q_len;
     const uint8_t *t; size_t t_len;
+    const uint8_t *v; size_t v_len;       /* BEP 20 client id, may be NULL */
+    int            ro; /* -1 unknown, 0 or 1 if "ro" key present as int */
 } dht_wrap_peek;
 
 int dht_wrap_peek_top(const uint8_t *buf, size_t len, dht_wrap_peek *out);

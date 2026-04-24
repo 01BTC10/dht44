@@ -1,0 +1,53 @@
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+  font: 13px/1.45 "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  background: #0b0d10;
+  color: #d8dee6;
+}
+a { color: #8fc0ff; text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+.app { padding: 14px 18px; }
+header { display: flex; align-items: baseline; gap: 18px; margin-bottom: 10px; }
+header h1 { font-size: 18px; margin: 0; color: #8fc0ff; letter-spacing: 1px; }
+.badge-live { font-size: 20px; color: #f66; transition: color 0.25s; }
+.badge-live.on { color: #6f6; }
+.stats { display: flex; gap: 18px; flex-wrap: wrap; margin: 4px 0 14px 0; font-size: 13px; }
+.stats div { background: #14181d; padding: 6px 10px; border: 1px solid #232a31; border-radius: 3px; }
+.stats div b { color: #8fc0ff; margin-right: 4px; }
+
+nav.tabs { display: flex; gap: 4px; margin-bottom: 8px; }
+nav.tabs button {
+  background: #14181d; color: #d8dee6; border: 1px solid #232a31;
+  padding: 5px 14px; cursor: pointer; font: inherit; border-radius: 2px;
+}
+nav.tabs button:hover { background: #1b2127; }
+nav.tabs button.active { background: #1f2a36; border-color: #8fc0ff; color: #8fc0ff; }
+
+table { width: 100%; border-collapse: collapse; font-size: 12px; }
+th, td {
+  padding: 4px 8px; text-align: left;
+  border-bottom: 1px solid #1b2127;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 280px;
+}
+th { color: #8fc0ff; background: #14181d; position: sticky; top: 0; z-index: 1; }
+tbody tr:hover { background: #14181d; }
+td.hex { color: #8892a0; font-size: 11px; }
+td.geo { color: #e0a648; }
+td.asn { color: #c27fe0; }
+td.dim { color: #556066; }
+td.ok  { color: #6f6; }
+td.bad { color: #f66; }
+td.newrow { animation: flash 1.8s ease-out; }
+@keyframes flash { from { background: #22331e; } to { background: transparent; } }
+
+.filter { margin: 6px 0; }
+.filter input {
+  background: #0f1316; color: #d8dee6; border: 1px solid #232a31;
+  padding: 5px 10px; font: inherit; width: 260px; border-radius: 2px;
+}
+.small { color: #556066; font-size: 11px; }
