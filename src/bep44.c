@@ -104,11 +104,19 @@ bep44_build_get_query(uint8_t *out, size_t out_cap,
     bencode_dict_open(&w);
         bencode_cstr(&w, "a");
         bencode_dict_open(&w);
+            /* sub-dict order: id, seq, target, want.
+             * "want" is a list of families the responder should return
+             * (BEP 32). Advertise both so nodes6 rides alongside nodes. */
             bencode_cstr(&w, "id");     bencode_str(&w, our_id, BEP44_NODE_ID_LEN);
             if (seq) {
                 bencode_cstr(&w, "seq"); bencode_int(&w, *seq);
             }
             bencode_cstr(&w, "target"); bencode_str(&w, target, BEP44_TARGET_LEN);
+            bencode_cstr(&w, "want");
+            bencode_list_open(&w);
+                bencode_cstr(&w, "n4");
+                bencode_cstr(&w, "n6");
+            bencode_list_close(&w);
         bencode_dict_close(&w);
         bencode_cstr(&w, "q");          bencode_cstr(&w, "get");
         bencode_cstr(&w, "t");          bencode_str(&w, tid, tid_len);

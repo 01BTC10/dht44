@@ -54,6 +54,14 @@ int state_save_nodes(const struct sockaddr_in *nodes, int count);
 int state_load_nodes(struct sockaddr_in *out, int max, int *count_out);
 
 /*
+ * IPv6 warm-start peers. Stored as 18-byte compact records in nodes6.bin
+ * (16 B addr || 2 B port, network order). Mirrors state_save_nodes for
+ * the v6 routing table.
+ */
+int state_save_nodes6(const struct sockaddr_in6 *nodes, int count);
+int state_load_nodes6(struct sockaddr_in6 *out, int max, int *count_out);
+
+/*
  * Items the daemon stores for republish + inbound serve.
  *
  * On disk: $DHT44_HOME/items/<40-hex-target>.json — human-readable JSON.
