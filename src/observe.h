@@ -37,19 +37,20 @@ typedef void (*observe_event_cb)(const char *topic, const char *json,
                                  void *closure);
 void observe_set_event_sink(observe_event_cb cb, void *closure);
 
-/* Raw packet hook. peek may be NULL (forces our own peek). */
+/* Raw packet hook. peek may be NULL (forces our own peek). Accepts both
+ * AF_INET and AF_INET6 peers; peerlen MUST match the family. */
 void observe_packet(int dir,
-                    const struct sockaddr_in *peer,
+                    const struct sockaddr *peer, socklen_t peerlen,
                     const uint8_t *buf, size_t len,
                     const dht_wrap_peek *peek);
 
 /* Enrichment from a fully decoded inbound query args dict. */
-void observe_query_fields(const struct sockaddr_in *peer,
+void observe_query_fields(const struct sockaddr *peer, socklen_t peerlen,
                           int is_put,
                           const bencode_value *a);
 
 /* RTT sample (milliseconds). Called after a response matches our query. */
-void observe_rtt(const struct sockaddr_in *peer, int rtt_ms);
+void observe_rtt(const struct sockaddr *peer, socklen_t peerlen, int rtt_ms);
 
 /* BEP 44 item. pk/salt/sig may be NULL for immutable. */
 void observe_bep44_item(const uint8_t target[BEP44_TARGET_LEN],

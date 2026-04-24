@@ -201,25 +201,39 @@ db_flush(void)
  * Writes
  * ============================================================ */
 
-static void
-peer_key(const struct sockaddr_in *p, char *ip_out, size_t ip_cap, int *port_out)
+/* Accept both v4 and v6 peers; format ip as text in ip_out, port as host order. */
+static int
+peer_key(const struct sockaddr *sa, char *ip_out, size_t ip_cap, int *port_out)
 {
-    inet_ntop(AF_INET, &p->sin_addr, ip_out, ip_cap);
-    *port_out = ntohs(p->sin_port);
+    if (!sa) return -1;
+    if (sa->sa_family == AF_INET) {
+        const struct sockaddr_in *p = (const struct sockaddr_in *)sa;
+        if (!inet_ntop(AF_INET, &p->sin_addr, ip_out, ip_cap)) return -1;
+        *port_out = ntohs(p->sin_port);
+        return 0;
+    }
+    if (sa->sa_family == AF_INET6) {
+        const struct sockaddr_in6 *p = (const struct sockaddr_in6 *)sa;
+        if (!inet_ntop(AF_INET6, &p->sin6_addr, ip_out, ip_cap)) return -1;
+        *port_out = ntohs(p->sin6_port);
+        return 0;
+    }
+    return -1;
 }
 
 void
-db_upsert_peer(const struct sockaddr_in *peer,
+db_upsert_peer(const struct sockaddr *peer, socklen_t peerlen,
                const uint8_t node_id[BEP44_NODE_ID_LEN], int has_node_id,
                const uint8_t *v_string, size_t v_len,
                int ro, int bep42_ok, int rtt_ms, char direction)
 {
+    (void)peerlen;
     if (!g_db || !peer) return;
     tx_begin_if_needed();
 
-    char ip[INET_ADDRSTRLEN];
+    char ip[INET6_ADDRSTRLEN];
     int  port;
-    peer_key(peer, ip, sizeof(ip), &port);
+    if (peer_key(peer, ip, sizeof(ip), &port) < 0) return;
     int64_t now = time(NULL);
 
     sqlite3_stmt *s = g_ins_peer;
@@ -255,19 +269,20 @@ db_upsert_peer(const struct sockaddr_in *peer,
 
 void
 db_insert_query(int64_t ts,
-                const struct sockaddr_in *peer,
+                const struct sockaddr *peer, socklen_t peerlen,
                 const char *direction,
                 const char *y,
                 const char *q,
                 const uint8_t *target,
                 int raw_size)
 {
+    (void)peerlen;
     if (!g_db || !peer) return;
     tx_begin_if_needed();
 
-    char ip[INET_ADDRSTRLEN];
+    char ip[INET6_ADDRSTRLEN];
     int  port;
-    peer_key(peer, ip, sizeof(ip), &port);
+    if (peer_key(peer, ip, sizeof(ip), &port) < 0) return;
 
     sqlite3_stmt *s = g_ins_query;
     sqlite3_reset(s);
@@ -713,15 +728,17 @@ db_select_client_stats_json(int limit)
 }
 
 void
-db_upsert_edge(const struct sockaddr_in *src, const struct sockaddr_in *dst)
+db_upsert_edge(const struct sockaddr *src, socklen_t srclen,
+               const struct sockaddr *dst, socklen_t dstlen)
 {
+    (void)srclen; (void)dstlen;
     if (!g_db || !src || !dst) return;
     tx_begin_if_needed();
 
-    char sip[INET_ADDRSTRLEN], dip[INET_ADDRSTRLEN];
+    char sip[INET6_ADDRSTRLEN], dip[INET6_ADDRSTRLEN];
     int  sport, dport;
-    peer_key(src, sip, sizeof(sip), &sport);
-    peer_key(dst, dip, sizeof(dip), &dport);
+    if (peer_key(src, sip, sizeof(sip), &sport) < 0) return;
+    if (peer_key(dst, dip, sizeof(dip), &dport) < 0) return;
 
     sqlite3_stmt *s = g_ins_edge;
     sqlite3_reset(s);

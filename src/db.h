@@ -29,8 +29,9 @@ void db_flush(void);
 /* UPSERT: create-or-update peer row. Any of node_id/v_string/ro/rtt_ms may
  * be NULL / -1 if unknown (existing column values are preserved). direction
  * determines which counter (queries_in or queries_out) gets bumped — pass 'i',
- * 'o', or 0 for no bump. */
-void db_upsert_peer(const struct sockaddr_in *peer,
+ * 'o', or 0 for no bump. peer may be AF_INET or AF_INET6; the `ip` column
+ * is TEXT so storage doesn't care about the family. */
+void db_upsert_peer(const struct sockaddr *peer, socklen_t peerlen,
                     const uint8_t node_id[BEP44_NODE_ID_LEN], int has_node_id,
                     const uint8_t *v_string, size_t v_len,
                     int ro /* 0|1|-1 */,
@@ -40,7 +41,7 @@ void db_upsert_peer(const struct sockaddr_in *peer,
 
 /* Append a query-log row. target may be NULL. q may be NULL for responses. */
 void db_insert_query(int64_t ts,
-                     const struct sockaddr_in *peer,
+                     const struct sockaddr *peer, socklen_t peerlen,
                      const char *direction /* "in"|"out" */,
                      const char *y /* "q"|"r"|"e" */,
                      const char *q /* "ping"|"find_node"|... or NULL */,
@@ -80,9 +81,9 @@ int db_foreach_peer_ip(int (*cb)(const char *ip, void *closure), void *closure);
 
 /* Record a directed "A knows about B" edge (B appeared in a nodes list that
  * A sent back in a find_node response). Safe to call many times; dedupes on
- * (src, dst) and touches last_seen. */
-void db_upsert_edge(const struct sockaddr_in *src,
-                    const struct sockaddr_in *dst);
+ * (src, dst) and touches last_seen. Accepts mixed families. */
+void db_upsert_edge(const struct sockaddr *src, socklen_t srclen,
+                    const struct sockaddr *dst, socklen_t dstlen);
 
 /* Return the graph snapshot JSON: top-N peers by degree + the subgraph of
  * edges between them. Shape:

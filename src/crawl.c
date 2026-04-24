@@ -253,10 +253,13 @@ build_find_node(uint8_t *out, size_t cap,
 /* Ingest a response's compact-nodes blob into the worker's shortlist and
  * record each (responder → neighbour) edge in the db for graph view. */
 static void
-ingest_compact_nodes(struct worker *w, const struct sockaddr_in *responder,
+ingest_compact_nodes(struct worker *w, const struct sockaddr *responder,
+                     socklen_t responderlen,
                      const uint8_t *b, size_t n)
 {
-    /* Each record is 26 bytes: 20 id + 4 ip + 2 port (both network order). */
+    /* Each record is 26 bytes: 20 id + 4 ip + 2 port (both network order).
+     * Worker shortlist is v4-only (crawler walks v4); v6 ingest is handled
+     * separately below. Edges are recorded for both families. */
     for (size_t i = 0; i + 26 <= n; i += 26) {
         struct sockaddr_in sa;
         memset(&sa, 0, sizeof(sa));
@@ -264,7 +267,25 @@ ingest_compact_nodes(struct worker *w, const struct sockaddr_in *responder,
         memcpy(&sa.sin_addr.s_addr, b + i + 20, 4);
         memcpy(&sa.sin_port,        b + i + 24, 2);
         sl_insert(w, &sa, b + i);
-        if (responder) db_upsert_edge(responder, &sa);
+        if (responder) db_upsert_edge(responder, responderlen,
+                                      (const struct sockaddr *)&sa, sizeof(sa));
+    }
+}
+
+/* Parse 38-byte compact-nodes6 records and record edges only. v6 neighbours
+ * don't enter the v4-only shortlist. */
+static void
+ingest_compact_nodes6(const struct sockaddr *responder, socklen_t responderlen,
+                      const uint8_t *b, size_t n)
+{
+    for (size_t i = 0; i + 38 <= n; i += 38) {
+        struct sockaddr_in6 sa;
+        memset(&sa, 0, sizeof(sa));
+        sa.sin6_family = AF_INET6;
+        memcpy(&sa.sin6_addr, b + i + 20, 16);
+        memcpy(&sa.sin6_port, b + i + 36,  2);
+        if (responder) db_upsert_edge(responder, responderlen,
+                                      (const struct sockaddr *)&sa, sizeof(sa));
     }
 }
 
@@ -282,15 +303,13 @@ on_tx(bep44_tx_event ev,
     int idx = w->inflight_idx;
     w->inflight_idx = -1;
 
-    const struct sockaddr_in *p4 = (const struct sockaddr_in *)peer;
-
     /* RTT */
     if (ev == BEP44_TX_RESPONSE && w->send_tv.tv_sec) {
         struct timeval now;
         gettimeofday(&now, NULL);
         long dms = (now.tv_sec - w->send_tv.tv_sec) * 1000
                  + (now.tv_usec - w->send_tv.tv_usec) / 1000;
-        if (dms >= 0 && dms < 60000) observe_rtt(p4, (int)dms);
+        if (dms >= 0 && dms < 60000) observe_rtt(peer, (socklen_t)peerlen, (int)dms);
     }
 
     /* Update shortlist state for the probed candidate. */
@@ -304,7 +323,8 @@ on_tx(bep44_tx_event ev,
     /* Responder's node id */
     const bencode_value *id = bencode_dict_get(r, "id");
     if (id && id->type == BENCODE_STR && id->str.len == BEP44_NODE_ID_LEN) {
-        db_upsert_peer(p4, id->str.bytes, 1, NULL, 0, -1, -1, -1, 0);
+        db_upsert_peer(peer, (socklen_t)peerlen, id->str.bytes, 1,
+                       NULL, 0, -1, -1, -1, 0);
         /* also update our shortlist entry if its id wasn't known */
         if (idx >= 0 && !w->sl[idx].has_id) {
             memcpy(w->sl[idx].id, id->str.bytes, BEP44_NODE_ID_LEN);
@@ -316,9 +336,15 @@ on_tx(bep44_tx_event ev,
      * instead of relying on jech's routing table catching up, we feed the
      * newly learned peers directly into the XOR-sorted worker shortlist
      * so the next probe advances to a closer node immediately. */
-    const bencode_value *nodes = bencode_dict_get(r, "nodes");
+    const bencode_value *nodes  = bencode_dict_get(r, "nodes");
+    const bencode_value *nodes6 = bencode_dict_get(r, "nodes6");
     if (nodes && nodes->type == BENCODE_STR) {
-        ingest_compact_nodes(w, p4, nodes->str.bytes, nodes->str.len);
+        ingest_compact_nodes(w, peer, (socklen_t)peerlen,
+                             nodes->str.bytes, nodes->str.len);
+    }
+    if (nodes6 && nodes6->type == BENCODE_STR) {
+        ingest_compact_nodes6(peer, (socklen_t)peerlen,
+                              nodes6->str.bytes, nodes6->str.len);
     }
 }
 

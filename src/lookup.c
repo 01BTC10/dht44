@@ -485,15 +485,15 @@ on_tx(bep44_tx_event ev,
         }
 
         if (observe_enabled()) {
-            const struct sockaddr_in *p4 = (const struct sockaddr_in *)peer;
-            if (rtt_ms >= 0) observe_rtt(p4, rtt_ms);
+            if (rtt_ms >= 0) observe_rtt(peer, (socklen_t)peerlen, rtt_ms);
             if (id && id->type == BENCODE_STR
                 && id->str.len == BEP44_NODE_ID_LEN) {
                 /* enrich peer with node_id via a zero-delta upsert */
-                extern void db_upsert_peer(const struct sockaddr_in *,
+                extern void db_upsert_peer(const struct sockaddr *, socklen_t,
                     const uint8_t *, int, const uint8_t *, size_t,
                     int, int, int, char);
-                db_upsert_peer(p4, id->str.bytes, 1, NULL, 0, -1, -1, -1, 0);
+                db_upsert_peer(peer, (socklen_t)peerlen, id->str.bytes, 1,
+                               NULL, 0, -1, -1, -1, 0);
             }
             /* Archive any BEP 44 item we just learned (mutable tuples). */
             const bencode_value *vv  = bencode_dict_get(r, "v");

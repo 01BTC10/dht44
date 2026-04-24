@@ -803,10 +803,11 @@ on_inbound_query(const struct sockaddr *peer, int peerlen,
                  const bencode_value *a,
                  void *closure)
 {
-    (void)closure; (void)peerlen;
+    (void)closure;
     const struct sockaddr_in *p4 = (const struct sockaddr_in *)peer;
 
-    if (observe_enabled()) observe_query_fields(p4, is_put, a);
+    if (observe_enabled())
+        observe_query_fields(peer, (socklen_t)peerlen, is_put, a);
 
     if (!is_put) {
         /* GET — look up target in our items dir */

@@ -42,12 +42,21 @@ emit(const char *topic, json_t *payload)
 }
 
 static void
-peer_json(json_t *o, const struct sockaddr_in *peer)
+peer_json(json_t *o, const struct sockaddr *peer)
 {
-    char ip[INET_ADDRSTRLEN];
-    inet_ntop(AF_INET, &peer->sin_addr, ip, sizeof(ip));
+    char ip[INET6_ADDRSTRLEN] = {0};
+    int  port = 0;
+    if (peer->sa_family == AF_INET) {
+        const struct sockaddr_in *p = (const struct sockaddr_in *)peer;
+        inet_ntop(AF_INET, &p->sin_addr, ip, sizeof(ip));
+        port = ntohs(p->sin_port);
+    } else if (peer->sa_family == AF_INET6) {
+        const struct sockaddr_in6 *p = (const struct sockaddr_in6 *)peer;
+        inet_ntop(AF_INET6, &p->sin6_addr, ip, sizeof(ip));
+        port = ntohs(p->sin6_port);
+    }
     json_object_set_new(o, "ip",   json_string(ip));
-    json_object_set_new(o, "port", json_integer(ntohs(peer->sin_port)));
+    json_object_set_new(o, "port", json_integer(port));
 }
 
 static char *
@@ -137,7 +146,7 @@ args_node_id(const bencode_value *a, size_t *len_out)
 
 void
 observe_packet(int dir,
-               const struct sockaddr_in *peer,
+               const struct sockaddr *peer, socklen_t peerlen,
                const uint8_t *buf, size_t len,
                const dht_wrap_peek *peek)
 {
@@ -168,7 +177,7 @@ observe_packet(int dir,
             if (a && a->type == BENCODE_DICT) {
                 const bencode_value *id = bencode_dict_get(a, "id");
                 if (id && id->type == BENCODE_STR && id->str.len == 20) {
-                    db_upsert_peer(peer, id->str.bytes, 1, NULL, 0, -1, -1, -1, 0);
+                    db_upsert_peer(peer, peerlen, id->str.bytes, 1, NULL, 0, -1, -1, -1, 0);
                 }
                 const char *tkey = NULL;
                 const char *src  = NULL;
@@ -193,11 +202,11 @@ observe_packet(int dir,
         if (root) bencode_free(ar);
     }
 
-    db_insert_query(now, peer, dirs, y, q_copy, target_ptr, (int)len);
+    db_insert_query(now, peer, peerlen, dirs, y, q_copy, target_ptr, (int)len);
 
     /* Peer presence row. Touches last_seen + bumps direction counter. */
     char peer_dir = (dir == OBSERVE_OUT) ? 'o' : 'i';
-    db_upsert_peer(peer, NULL, 0,
+    db_upsert_peer(peer, peerlen, NULL, 0,
                    peek->v, peek->v_len,
                    peek->ro,
                    -1, -1, peer_dir);
@@ -219,7 +228,7 @@ observe_packet(int dir,
 }
 
 void
-observe_query_fields(const struct sockaddr_in *peer,
+observe_query_fields(const struct sockaddr *peer, socklen_t peerlen,
                      int is_put,
                      const bencode_value *a)
 {
@@ -228,7 +237,7 @@ observe_query_fields(const struct sockaddr_in *peer,
     size_t idlen = 0;
     const uint8_t *id = args_node_id(a, &idlen);
     if (id) {
-        db_upsert_peer(peer, id, 1, NULL, 0, -1, -1, -1, 0);
+        db_upsert_peer(peer, peerlen, id, 1, NULL, 0, -1, -1, -1, 0);
     }
 
     size_t tlen = 0;
@@ -257,10 +266,10 @@ observe_query_fields(const struct sockaddr_in *peer,
 }
 
 void
-observe_rtt(const struct sockaddr_in *peer, int rtt_ms)
+observe_rtt(const struct sockaddr *peer, socklen_t peerlen, int rtt_ms)
 {
     if (!g_enabled || !peer || rtt_ms < 0) return;
-    db_upsert_peer(peer, NULL, 0, NULL, 0, -1, -1, rtt_ms, 0);
+    db_upsert_peer(peer, peerlen, NULL, 0, NULL, 0, -1, -1, rtt_ms, 0);
 }
 
 void

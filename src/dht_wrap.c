@@ -716,11 +716,12 @@ dht_wrap_step(const void *buf, size_t buflen,
     int forward = 1;
     if (buf && buflen > 0) {
         /* Observe every inbound packet before dispatch. */
-        if (observe_enabled() && fromlen == (int)sizeof(struct sockaddr_in)) {
+        if (observe_enabled()
+            && (fromlen == (int)sizeof(struct sockaddr_in)
+                || fromlen == (int)sizeof(struct sockaddr_in6))) {
             dht_wrap_peek op;
             if (dht_wrap_peek_top(buf, buflen, &op) == 0) {
-                observe_packet(OBSERVE_IN,
-                               (const struct sockaddr_in *)from,
+                observe_packet(OBSERVE_IN, from, (socklen_t)fromlen,
                                buf, buflen, &op);
             }
         }
@@ -769,13 +770,12 @@ dht_wrap_sendto(const struct sockaddr *peer, int peerlen,
         fprintf(stderr, "[dht44:dht_wrap] sendto: %s\n", strerror(errno));
         return -1;
     }
-    /* Observer is v4-only today (sockaddr_in signature). Commit B makes it
-     * generic; until then, skip v6 traffic for observation. */
-    if (observe_enabled() && peerlen == (int)sizeof(struct sockaddr_in)) {
+    if (observe_enabled()
+        && (peerlen == (int)sizeof(struct sockaddr_in)
+            || peerlen == (int)sizeof(struct sockaddr_in6))) {
         dht_wrap_peek op;
         if (dht_wrap_peek_top(packet, packet_len, &op) == 0) {
-            observe_packet(OBSERVE_OUT,
-                           (const struct sockaddr_in *)peer,
+            observe_packet(OBSERVE_OUT, peer, (socklen_t)peerlen,
                            packet, packet_len, &op);
         }
     }
