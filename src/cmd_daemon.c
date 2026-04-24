@@ -50,6 +50,7 @@ typedef struct {
     int      no_upnp;
     int      upnp_lifetime;
     int      no_routers;            /* skip pinging public bootstrap routers */
+    int      no_ipv6;               /* skip binding the v6 UDP socket */
     const char *bootstrap[MAX_BOOTSTRAP];
     int      bootstrap_count;
 } daemon_args;
@@ -57,7 +58,7 @@ typedef struct {
 static const char USAGE_DAEMON[] =
     "usage: dht44 daemon [--port N] [--republish MIN] [--no-upnp]\n"
     "                    [--upnp-lifetime SEC] [--bootstrap HOST:PORT]...\n"
-    "                    [--no-routers]\n";
+    "                    [--no-routers] [--no-ipv6]\n";
 
 static int
 parse_args(int argc, char **argv, daemon_args *a)
@@ -76,6 +77,8 @@ parse_args(int argc, char **argv, daemon_args *a)
             a->no_upnp = 1;
         } else if (strcmp(argv[i], "--no-routers") == 0) {
             a->no_routers = 1;
+        } else if (strcmp(argv[i], "--no-ipv6") == 0) {
+            a->no_ipv6 = 1;
         } else if (strcmp(argv[i], "--upnp-lifetime") == 0 && i + 1 < argc) {
             a->upnp_lifetime = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--bootstrap") == 0 && i + 1 < argc) {
@@ -92,19 +95,35 @@ parse_args(int argc, char **argv, daemon_args *a)
     return 0;
 }
 
-/* "host:port" → ping. Used by --bootstrap */
+/* "host:port" → ping. Used by --bootstrap. Accepts both v4 and v6 resolutions;
+ * dht_ping_node uses the matching socket jech was initialised with. For v6
+ * addresses with IP literals like "[::1]:6881", the caller passes the host
+ * without brackets (strrchr picks the last ':', but for IPv6 literals that
+ * splits wrong — so we handle bracketed form here). */
 static int
 ping_host_port(const char *hp)
 {
     char buf[256];
     snprintf(buf, sizeof(buf), "%s", hp);
-    char *colon = strrchr(buf, ':');
-    if (!colon) return -1;
-    *colon = 0;
-    const char *host = buf;
-    const char *port = colon + 1;
 
-    struct addrinfo hints = { .ai_family = AF_INET, .ai_socktype = SOCK_DGRAM };
+    const char *host;
+    const char *port;
+    if (buf[0] == '[') {
+        /* "[ipv6]:port" */
+        char *close = strchr(buf, ']');
+        if (!close || close[1] != ':') return -1;
+        *close = 0;
+        host = buf + 1;
+        port = close + 2;
+    } else {
+        char *colon = strrchr(buf, ':');
+        if (!colon) return -1;
+        *colon = 0;
+        host = buf;
+        port = colon + 1;
+    }
+
+    struct addrinfo hints = { .ai_family = AF_UNSPEC, .ai_socktype = SOCK_DGRAM };
     struct addrinfo *res = NULL;
     if (getaddrinfo(host, port, &hints, &res) != 0) return -1;
     int rc = -1;
@@ -401,7 +420,7 @@ on_put_lookup_done(int rc,
         if (plen < 0) continue;
 
         if (dht_wrap_send_query((const struct sockaddr *)&t->peer,
-                                (int)sizeof(t->peer),
+                                (int)t->peerlen,
                                 pkt, (size_t)plen,
                                 tid, sizeof(tid),
                                 5000, on_put_response, p) == 0) {
@@ -980,6 +999,10 @@ periodic_save_nodes(void)
     struct sockaddr_in nodes[256];
     int n = dht_wrap_get_nodes(nodes, 256);
     state_save_nodes(nodes, n);
+
+    struct sockaddr_in6 nodes6[256];
+    int n6 = dht_wrap_get_nodes6(nodes6, 256);
+    if (n6 > 0) state_save_nodes6(nodes6, n6);
 }
 
 /*
@@ -1051,19 +1074,28 @@ cmd_daemon(int argc, char **argv)
     g_lock_fd = state_lock();
     if (g_lock_fd < 0) return 2;
 
-    if (dht_wrap_init(g_args.port) < 0) {
+    if (dht_wrap_init_opt(g_args.port, !g_args.no_ipv6) < 0) {
         state_unlock(g_lock_fd);
         return 2;
     }
     dht_wrap_set_query_handler(on_inbound_query, NULL);
 
-    /* warm-start nodes */
+    /* warm-start v4 nodes */
     {
         struct sockaddr_in warm[256];
         int n = 0;
         if (state_load_nodes(warm, 256, &n) == 0 && n > 0) {
             for (int i = 0; i < n; i++) dht_wrap_insert_warm(&warm[i]);
-            fprintf(stderr, "[dht44:daemon] warm-start: pinged %d saved nodes\n", n);
+            fprintf(stderr, "[dht44:daemon] warm-start v4: pinged %d saved nodes\n", n);
+        }
+    }
+    /* warm-start v6 nodes */
+    {
+        struct sockaddr_in6 warm6[256];
+        int n6 = 0;
+        if (state_load_nodes6(warm6, 256, &n6) == 0 && n6 > 0) {
+            for (int i = 0; i < n6; i++) dht_wrap_insert_warm6(&warm6[i]);
+            fprintf(stderr, "[dht44:daemon] warm-start v6: pinged %d saved nodes\n", n6);
         }
     }
 
@@ -1126,8 +1158,10 @@ cmd_daemon(int argc, char **argv)
         fd_set rfds;
         FD_ZERO(&rfds);
         int maxfd = -1;
-        int udp_fd = dht_wrap_socket();
-        if (udp_fd >= 0) { FD_SET(udp_fd, &rfds); if (udp_fd > maxfd) maxfd = udp_fd; }
+        int udp_fd  = dht_wrap_socket();
+        int udp6_fd = dht_wrap_socket6();
+        if (udp_fd  >= 0) { FD_SET(udp_fd,  &rfds); if (udp_fd  > maxfd) maxfd = udp_fd;  }
+        if (udp6_fd >= 0) { FD_SET(udp6_fd, &rfds); if (udp6_fd > maxfd) maxfd = udp6_fd; }
         FD_SET(g_listen_fd, &rfds);
         if (g_listen_fd > maxfd) maxfd = g_listen_fd;
         for (int i = 0; i < MAX_IPC_CLIENTS; i++) {
@@ -1145,13 +1179,16 @@ cmd_daemon(int argc, char **argv)
             break;
         }
 
-        /* UDP packet ready */
-        if (udp_fd >= 0 && FD_ISSET(udp_fd, &rfds)) {
+        /* UDP packet ready on either family's socket. */
+        int fds[2] = { udp_fd, udp6_fd };
+        for (int fi = 0; fi < 2; fi++) {
+            int fd = fds[fi];
+            if (fd < 0 || !FD_ISSET(fd, &rfds)) continue;
             uint8_t pkt[2048];
             for (;;) {
                 struct sockaddr_storage from;
                 socklen_t fromlen = sizeof(from);
-                ssize_t n = recvfrom(udp_fd, pkt, sizeof(pkt) - 1, 0,
+                ssize_t n = recvfrom(fd, pkt, sizeof(pkt) - 1, 0,
                                      (struct sockaddr *)&from, &fromlen);
                 if (n < 0) {
                     if (errno == EAGAIN || errno == EWOULDBLOCK) break;
@@ -1242,12 +1279,13 @@ cmd_daemon(int argc, char **argv)
             next_upnp = now + 30 * 60;
         }
         if (now >= next_status) {
-            int g = 0, d = 0;
-            dht_wrap_status(&g, &d);
+            int g = 0, d = 0, g6 = 0, d6 = 0;
+            dht_wrap_status (&g,  &d);
+            dht_wrap_status6(&g6, &d6);
             if (g != last_good || g_pkts_in || g_pkts_out || g_ipc_reqs) {
                 fprintf(stderr,
-                    "[dht44:daemon] table good=%d dub=%d  rx=%lu tx=%lu  q_in[get=%lu put=%lu] q_out=%lu  ipc=%lu  stored_for_peers=%lu\n",
-                    g, d, g_pkts_in, g_pkts_out,
+                    "[dht44:daemon] table v4[good=%d dub=%d] v6[good=%d dub=%d]  rx=%lu tx=%lu  q_in[get=%lu put=%lu] q_out=%lu  ipc=%lu  stored_for_peers=%lu\n",
+                    g, d, g6, d6, g_pkts_in, g_pkts_out,
                     g_q_in_get, g_q_in_put, g_q_out, g_ipc_reqs,
                     g_items_stored_peer);
                 last_good = g;

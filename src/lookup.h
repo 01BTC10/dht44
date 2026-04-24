@@ -15,7 +15,8 @@
 
 typedef struct lookup_run lookup_run;
 
-/* A value carried back from a peer. mutable_ != 0 means k/sig/seq are set. */
+/* A value carried back from a peer. mutable_ != 0 means k/sig/seq are set.
+ * Storage is sockaddr_storage so v4 and v6 responders are both representable. */
 typedef struct {
     int      mutable_;
     int64_t  seq;
@@ -23,12 +24,14 @@ typedef struct {
     uint8_t  sig[BEP44_SIG_LEN];
     uint8_t  v[BEP44_MAX_V];
     size_t   v_len;
-    struct sockaddr_in from;
+    struct sockaddr_storage from;
+    socklen_t fromlen;
 } lookup_value;
 
 /* A node that responded with a token (so we can subsequently put to it). */
 typedef struct {
-    struct sockaddr_in peer;
+    struct sockaddr_storage peer;
+    socklen_t          peerlen;
     uint8_t            token[64];
     size_t             token_len;
 } lookup_token;

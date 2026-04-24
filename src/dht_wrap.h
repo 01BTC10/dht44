@@ -28,18 +28,25 @@ int dht_wrap_peek_top(const uint8_t *buf, size_t len, dht_wrap_peek *out);
  * ================================================================ */
 
 /*
- * Bind a non-blocking AF_INET UDP socket on `port` (0 = ephemeral), load or
- * generate the persistent node_id, and call dht_init. Returns 0 on success.
+ * Bind non-blocking UDP sockets on `port` (0 = ephemeral): one AF_INET,
+ * one AF_INET6, load or generate the persistent node_id, and call
+ * dht_init. Returns 0 on success.
+ *
+ * dht_wrap_init() enables IPv6; dht_wrap_init_opt(port, 0) skips v6.
+ * If v6 bind fails at runtime (no v6 stack / disabled interface) the
+ * daemon continues in v4-only mode.
  *
  * On success, sodium_init() has been invoked (callable repeatedly).
  */
 int dht_wrap_init(uint16_t port);
+int dht_wrap_init_opt(uint16_t port, int want_ipv6);
 
 /* Cleanup. Safe to call even if init failed partway. */
 void dht_wrap_uninit(void);
 
-/* The bound socket fd, for select(). -1 if not initialised. */
+/* Bound socket fds, for select(). -1 when not initialised or disabled. */
 int dht_wrap_socket(void);
+int dht_wrap_socket6(void);
 
 /* The 20-byte node ID we registered with jech. */
 const uint8_t *dht_wrap_node_id(void);
@@ -55,26 +62,34 @@ const uint8_t *dht_wrap_node_id(void);
  */
 int dht_wrap_ping_routers(void);
 
-/* Insert a saved warm-start node by address. Soft bootstrap: no traffic. */
-int dht_wrap_insert_warm(const struct sockaddr_in *sa);
+/* Insert a saved warm-start node by address. Soft bootstrap: no traffic.
+ * v4 + v6 variants so state.c can warm from nodes.bin and nodes6.bin. */
+int dht_wrap_insert_warm (const struct sockaddr_in  *sa);
+int dht_wrap_insert_warm6(const struct sockaddr_in6 *sa);
 
-/* Routing-table populations (good / dubious counts, IPv4 only in v1). */
-void dht_wrap_status(int *good, int *dubious);
-
-/*
- * Dump up to `max` IPv4 nodes from jech's routing table into `out`. Returns
- * the number written. Used to persist nodes.bin for warm restart.
- */
-int dht_wrap_get_nodes(struct sockaddr_in *out, int max);
+/* Routing-table populations (good / dubious counts) for each family. */
+void dht_wrap_status (int *good, int *dubious);
+void dht_wrap_status6(int *good, int *dubious);
 
 /*
- * Return up to `max` good IPv4 nodes from jech's routing table, sorted by
- * XOR distance to `target` (closest first). out[i] paired with out_ids[i].
+ * Dump up to `max` nodes from jech's routing table into `out`. Returns the
+ * number written. Used to persist nodes.bin / nodes6.bin for warm restart.
  */
-int dht_wrap_closest_to(const uint8_t target[20],
-                        struct sockaddr_in *out,
-                        uint8_t (*out_ids)[20],
-                        int max);
+int dht_wrap_get_nodes (struct sockaddr_in  *out, int max);
+int dht_wrap_get_nodes6(struct sockaddr_in6 *out, int max);
+
+/*
+ * Return up to `max` good nodes from jech's routing table, sorted by XOR
+ * distance to `target` (closest first). out[i] paired with out_ids[i].
+ */
+int dht_wrap_closest_to (const uint8_t target[20],
+                         struct sockaddr_in  *out,
+                         uint8_t (*out_ids)[20],
+                         int max);
+int dht_wrap_closest6_to(const uint8_t target[20],
+                         struct sockaddr_in6 *out,
+                         uint8_t (*out_ids)[20],
+                         int max);
 
 /*
  * Kick off jech's own iterative search toward `target`. Fire-and-forget;

@@ -33,7 +33,8 @@ static int lookup_verbose(void) {
 
 #define LDBG(...) do { if (lookup_verbose()) fprintf(stderr, __VA_ARGS__); } while (0)
 
-#define COMPACT_NODE_LEN 26   /* 20 id + 4 ip + 2 port */
+#define COMPACT_NODE_LEN  26  /* 20 id + 4 ip + 2 port (IPv4, "nodes") */
+#define COMPACT_NODE6_LEN 38  /* 20 id + 16 ip + 2 port (IPv6, "nodes6") */
 
 enum {
     NODE_FRESH = 0,
@@ -43,7 +44,8 @@ enum {
 };
 
 struct lookup_node {
-    struct sockaddr_in peer;
+    struct sockaddr_storage peer;
+    socklen_t          peerlen;
     uint8_t            id[BEP44_NODE_ID_LEN];
     int                has_id;
     uint8_t            state;
@@ -105,22 +107,37 @@ xor_cmp(const struct lookup_node *a, const struct lookup_node *b,
     return 0;
 }
 
+/* Family-aware sockaddr equality (ip + port match). */
 static int
-sa_eq(const struct sockaddr_in *a, const struct sockaddr_in *b)
+sa_eq(const struct sockaddr *a, const struct sockaddr *b)
 {
-    return a->sin_addr.s_addr == b->sin_addr.s_addr
-        && a->sin_port        == b->sin_port;
+    if (a->sa_family != b->sa_family) return 0;
+    if (a->sa_family == AF_INET) {
+        const struct sockaddr_in *x = (const struct sockaddr_in *)a;
+        const struct sockaddr_in *y = (const struct sockaddr_in *)b;
+        return x->sin_addr.s_addr == y->sin_addr.s_addr
+            && x->sin_port        == y->sin_port;
+    }
+    if (a->sa_family == AF_INET6) {
+        const struct sockaddr_in6 *x = (const struct sockaddr_in6 *)a;
+        const struct sockaddr_in6 *y = (const struct sockaddr_in6 *)b;
+        return x->sin6_port == y->sin6_port
+            && memcmp(&x->sin6_addr, &y->sin6_addr, sizeof(x->sin6_addr)) == 0;
+    }
+    return 0;
 }
 
 /* Insert sorted by distance. Returns the inserted index, or -1 if the
- * candidate is already present or shortlist is full. */
+ * candidate is already present or shortlist is full. Accepts both v4 and
+ * v6 peers — storage is sockaddr_storage with a peerlen tag. */
 static int
 shortlist_insert(lookup_run *L, const uint8_t *id_or_null,
-                 const struct sockaddr_in *peer)
+                 const struct sockaddr *peer, socklen_t peerlen)
 {
+    if (peerlen > (socklen_t)sizeof(struct sockaddr_storage)) return -1;
     /* dedupe by addr */
     for (int i = 0; i < L->shortlist_count; i++) {
-        if (sa_eq(&L->shortlist[i].peer, peer)) {
+        if (sa_eq((const struct sockaddr *)&L->shortlist[i].peer, peer)) {
             /* upgrade id if we just learned it */
             if (id_or_null && !L->shortlist[i].has_id) {
                 memcpy(L->shortlist[i].id, id_or_null, BEP44_NODE_ID_LEN);
@@ -132,7 +149,8 @@ shortlist_insert(lookup_run *L, const uint8_t *id_or_null,
     if (L->shortlist_count >= LOOKUP_SHORTLIST) return -1;
 
     struct lookup_node n = {0};
-    n.peer = *peer;
+    memcpy(&n.peer, peer, peerlen);
+    n.peerlen = peerlen;
     n.state = NODE_FRESH;
     if (id_or_null) {
         memcpy(n.id, id_or_null, BEP44_NODE_ID_LEN);
@@ -280,7 +298,7 @@ send_to(lookup_run *L, int node_idx)
     /* 15s default per query; lookup deadline overrides */
     int qto = 5000;
     if (dht_wrap_send_query((const struct sockaddr *)&n->peer,
-                            (int)sizeof(n->peer),
+                            (int)n->peerlen,
                             pkt, (size_t)plen,
                             tid, sizeof(tid),
                             qto, on_tx, slot) < 0) {
@@ -292,10 +310,19 @@ send_to(lookup_run *L, int node_idx)
     L->in_flight++;
 
     if (lookup_verbose()) {
-        char ip[INET_ADDRSTRLEN];
-        inet_ntop(AF_INET, &n->peer.sin_addr, ip, sizeof(ip));
+        char ip[INET6_ADDRSTRLEN];
+        unsigned port = 0;
+        if (n->peer.ss_family == AF_INET) {
+            const struct sockaddr_in *p4 = (const struct sockaddr_in *)&n->peer;
+            inet_ntop(AF_INET, &p4->sin_addr, ip, sizeof(ip));
+            port = ntohs(p4->sin_port);
+        } else {
+            const struct sockaddr_in6 *p6 = (const struct sockaddr_in6 *)&n->peer;
+            inet_ntop(AF_INET6, &p6->sin6_addr, ip, sizeof(ip));
+            port = ntohs(p6->sin6_port);
+        }
         LDBG("[lookup] -> get to %s:%u (idx=%d, has_id=%d)\n",
-             ip, ntohs(n->peer.sin_port), node_idx, n->has_id);
+             ip, port, node_idx, n->has_id);
     }
 }
 
@@ -324,13 +351,29 @@ ingest_compact_nodes(lookup_run *L, const uint8_t *bytes, size_t len)
         sa.sin_family = AF_INET;
         memcpy(&sa.sin_addr, bytes + off + 20, 4);
         memcpy(&sa.sin_port, bytes + off + 24, 2);
-        shortlist_insert(L, id, &sa);
+        shortlist_insert(L, id, (const struct sockaddr *)&sa, sizeof(sa));
+    }
+    shortlist_resort(L);
+}
+
+/* Parallel parser for BEP 5 "nodes6" (38-byte records: 20 id + 16 ip + 2 port). */
+static void
+ingest_compact_nodes6(lookup_run *L, const uint8_t *bytes, size_t len)
+{
+    for (size_t off = 0; off + COMPACT_NODE6_LEN <= len;
+         off += COMPACT_NODE6_LEN) {
+        const uint8_t *id = bytes + off;
+        struct sockaddr_in6 sa = {0};
+        sa.sin6_family = AF_INET6;
+        memcpy(&sa.sin6_addr, bytes + off + 20, 16);
+        memcpy(&sa.sin6_port, bytes + off + 36, 2);
+        shortlist_insert(L, id, (const struct sockaddr *)&sa, sizeof(sa));
     }
     shortlist_resort(L);
 }
 
 static void
-ingest_value(lookup_run *L, const struct sockaddr *peer,
+ingest_value(lookup_run *L, const struct sockaddr *peer, socklen_t peerlen,
              const bencode_value *r)
 {
     const bencode_value *v = bencode_dict_get(r, "v");
@@ -338,13 +381,13 @@ ingest_value(lookup_run *L, const struct sockaddr *peer,
     /* `v` is a bencode value of any type — we re-emit its bencoded form */
     if (L->values_count >= LOOKUP_MAX_VALUES) return;
 
-    /* Compute the encoded length of `v` by re-walking. Easier: store as
-     * encoded bytes by using a writer with the original `r` source
-     * available through r->str.bytes/etc. For strings we know exactly. */
-
     lookup_value *lv = &L->values[L->values_count];
     memset(lv, 0, sizeof(*lv));
-    if (peer) lv->from = *(const struct sockaddr_in *)peer;
+    if (peer && peerlen > 0
+        && peerlen <= (socklen_t)sizeof(lv->from)) {
+        memcpy(&lv->from, peer, peerlen);
+        lv->fromlen = peerlen;
+    }
 
     /* Store the BENCODED form of v (e.g. "9:hello 888"), not the decoded
      * bytes. Downstream IPC serialisation expects the bencoded form so that
@@ -381,7 +424,7 @@ ingest_value(lookup_run *L, const struct sockaddr *peer,
 }
 
 static void
-record_token(lookup_run *L, const struct sockaddr *peer,
+record_token(lookup_run *L, const struct sockaddr *peer, socklen_t peerlen,
              const bencode_value *token)
 {
     if (!token || token->type != BENCODE_STR
@@ -389,8 +432,10 @@ record_token(lookup_run *L, const struct sockaddr *peer,
         return;
     }
     if (L->tokens_count >= LOOKUP_TOP_K) return;
+    if (peerlen <= 0 || peerlen > (socklen_t)sizeof(L->tokens[0].peer)) return;
     lookup_token *t = &L->tokens[L->tokens_count++];
-    t->peer = *(const struct sockaddr_in *)peer;
+    memcpy(&t->peer, peer, peerlen);
+    t->peerlen = peerlen;
     memcpy(t->token, token->str.bytes, token->str.len);
     t->token_len = token->str.len;
 }
@@ -426,38 +471,56 @@ on_tx(bep44_tx_event ev,
             shortlist_resort(L);
         }
 
-        const bencode_value *nodes = bencode_dict_get(r, "nodes");
+        const bencode_value *nodes  = bencode_dict_get(r, "nodes");
+        const bencode_value *nodes6 = bencode_dict_get(r, "nodes6");
         size_t added = 0;
-        if (nodes && nodes->type == BENCODE_STR) {
-            int before = L->shortlist_count;
-            ingest_compact_nodes(L, nodes->str.bytes, nodes->str.len);
-            added = (size_t)(L->shortlist_count - before);
-        }
+        int before = L->shortlist_count;
+        if (nodes  && nodes->type  == BENCODE_STR)
+            ingest_compact_nodes (L, nodes->str.bytes,  nodes->str.len);
+        if (nodes6 && nodes6->type == BENCODE_STR)
+            ingest_compact_nodes6(L, nodes6->str.bytes, nodes6->str.len);
+        added = (size_t)(L->shortlist_count - before);
 
         const bencode_value *token = bencode_dict_get(r, "token");
-        record_token(L, peer, token);
-        ingest_value(L, peer, r);
+        record_token(L, peer, (socklen_t)peerlen, token);
+        ingest_value(L, peer, (socklen_t)peerlen, r);
 
         if (lookup_verbose()) {
-            const struct sockaddr_in *p4 = (const struct sockaddr_in *)peer;
-            char ip[INET_ADDRSTRLEN];
-            inet_ntop(AF_INET, &p4->sin_addr, ip, sizeof(ip));
+            char ip[INET6_ADDRSTRLEN];
+            unsigned port = 0;
+            if (peer->sa_family == AF_INET) {
+                const struct sockaddr_in *p4 = (const struct sockaddr_in *)peer;
+                inet_ntop(AF_INET, &p4->sin_addr, ip, sizeof(ip));
+                port = ntohs(p4->sin_port);
+            } else {
+                const struct sockaddr_in6 *p6 = (const struct sockaddr_in6 *)peer;
+                inet_ntop(AF_INET6, &p6->sin6_addr, ip, sizeof(ip));
+                port = ntohs(p6->sin6_port);
+            }
             const bencode_value *v = bencode_dict_get(r, "v");
             LDBG("[lookup] <- reply %s:%u: nodes_added=%zu has_token=%d "
                  "has_v=%d shortlist=%d values=%d\n",
-                 ip, ntohs(p4->sin_port), added,
+                 ip, port, added,
                  token && token->type == BENCODE_STR ? 1 : 0,
                  v ? 1 : 0,
                  L->shortlist_count, L->values_count);
         }
     } else if (lookup_verbose()) {
-        const struct sockaddr_in *p4 = (const struct sockaddr_in *)peer;
-        char ip[INET_ADDRSTRLEN];
-        inet_ntop(AF_INET, &p4->sin_addr, ip, sizeof(ip));
+        char ip[INET6_ADDRSTRLEN];
+        unsigned port = 0;
+        if (peer->sa_family == AF_INET) {
+            const struct sockaddr_in *p4 = (const struct sockaddr_in *)peer;
+            inet_ntop(AF_INET, &p4->sin_addr, ip, sizeof(ip));
+            port = ntohs(p4->sin_port);
+        } else {
+            const struct sockaddr_in6 *p6 = (const struct sockaddr_in6 *)peer;
+            inet_ntop(AF_INET6, &p6->sin6_addr, ip, sizeof(ip));
+            port = ntohs(p6->sin6_port);
+        }
         LDBG("[lookup] <- %s from %s:%u\n",
              ev == BEP44_TX_TIMEOUT ? "timeout" :
              ev == BEP44_TX_ERROR   ? "error"   : "??",
-             ip, ntohs(p4->sin_port));
+             ip, port);
     }
 
     if (top_k_done(L)) {
@@ -512,13 +575,26 @@ lookup_start(const uint8_t target[BEP44_TARGET_LEN],
     uint8_t seed_ids[LOOKUP_SHORTLIST][BEP44_NODE_ID_LEN];
     int n = dht_wrap_closest_to(target, seed, seed_ids, LOOKUP_SHORTLIST);
     for (int i = 0; i < n; i++) {
-        shortlist_insert(L, seed_ids[i], &seed[i]);
+        shortlist_insert(L, seed_ids[i],
+                         (const struct sockaddr *)&seed[i], sizeof(seed[i]));
     }
-    /* Fallback: if the target-sorted call returned nothing (very early
-     * boot), seed from whatever is in the table without ids. */
+    /* Also seed from the v6 routing table (if populated). */
+    struct sockaddr_in6 seed6[LOOKUP_TOP_K];
+    uint8_t seed6_ids[LOOKUP_TOP_K][BEP44_NODE_ID_LEN];
+    int n6 = dht_wrap_closest6_to(target, seed6, seed6_ids, LOOKUP_TOP_K);
+    for (int i = 0; i < n6; i++) {
+        shortlist_insert(L, seed6_ids[i],
+                         (const struct sockaddr *)&seed6[i], sizeof(seed6[i]));
+    }
+    n += n6;
+    /* Fallback: if neither family returned anything (very early boot),
+     * seed from whatever is in the v4 table without ids. */
     if (n == 0) {
         int m = dht_wrap_get_nodes(seed, LOOKUP_TOP_K);
-        for (int i = 0; i < m; i++) shortlist_insert(L, NULL, &seed[i]);
+        for (int i = 0; i < m; i++) {
+            shortlist_insert(L, NULL,
+                             (const struct sockaddr *)&seed[i], sizeof(seed[i]));
+        }
         n = m;
     }
     if (lookup_verbose()) {

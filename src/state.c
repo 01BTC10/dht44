@@ -313,10 +313,11 @@ state_get_node_id(uint8_t out[BEP44_NODE_ID_LEN])
 }
 
 /* ============================================================
- * Nodes blob (compact IPv4)
+ * Nodes blob (compact IPv4 + compact IPv6)
  * ============================================================ */
 
-#define COMPACT_V4_LEN 6   /* 4 B addr + 2 B port */
+#define COMPACT_V4_LEN  6   /* 4 B addr + 2 B port */
+#define COMPACT_V6_LEN 18   /* 16 B addr + 2 B port */
 
 int
 state_save_nodes(const struct sockaddr_in *nodes, int count)
@@ -370,6 +371,65 @@ state_load_nodes(struct sockaddr_in *out, int max, int *count_out)
         out[n].sin_family = AF_INET;
         memcpy(&out[n].sin_addr, rec, 4);
         memcpy(&out[n].sin_port, rec + 4, 2);
+        n++;
+    }
+    close(fd);
+    *count_out = n;
+    return 0;
+}
+
+int
+state_save_nodes6(const struct sockaddr_in6 *nodes, int count)
+{
+    if (state_ensure_dir() < 0) return -1;
+    char home[PATH_MAX], path[PATH_MAX];
+    if (state_home(home, sizeof(home)) < 0) return -1;
+    if (join(path, sizeof(path), home, "nodes6.bin") < 0) return -1;
+
+    if (count <= 0) {
+        return write_atomic(path, "", 0, 0600);
+    }
+    size_t blob_len = (size_t)count * COMPACT_V6_LEN;
+    uint8_t *blob = malloc(blob_len);
+    if (!blob) return -1;
+    for (int i = 0; i < count; i++) {
+        memcpy(blob + i * COMPACT_V6_LEN,      &nodes[i].sin6_addr, 16);
+        memcpy(blob + i * COMPACT_V6_LEN + 16, &nodes[i].sin6_port,  2);
+    }
+    int rc = write_atomic(path, blob, blob_len, 0600);
+    free(blob);
+    return rc;
+}
+
+int
+state_load_nodes6(struct sockaddr_in6 *out, int max, int *count_out)
+{
+    *count_out = 0;
+    char home[PATH_MAX], path[PATH_MAX];
+    if (state_home(home, sizeof(home)) < 0) return -1;
+    if (join(path, sizeof(path), home, "nodes6.bin") < 0) return -1;
+
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        if (errno == ENOENT) return 0;
+        fprintf(stderr, "[dht44:state] open %s: %s\n", path, strerror(errno));
+        return -1;
+    }
+    int n = 0;
+    uint8_t rec[COMPACT_V6_LEN];
+    while (n < max) {
+        ssize_t r = read(fd, rec, COMPACT_V6_LEN);
+        if (r == 0) break;
+        if (r < 0) {
+            if (errno == EINTR) continue;
+            close(fd);
+            return -1;
+        }
+        if (r != COMPACT_V6_LEN) break;
+        memset(&out[n], 0, sizeof(out[n]));
+        out[n].sin6_family = AF_INET6;
+        memcpy(&out[n].sin6_addr, rec,      16);
+        memcpy(&out[n].sin6_port, rec + 16,  2);
         n++;
     }
     close(fd);

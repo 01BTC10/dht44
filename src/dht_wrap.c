@@ -87,13 +87,15 @@ dht_random_bytes(void *buf, size_t size)
 struct pending_tx {
     int            in_use;
     uint8_t        tid[2];
-    struct sockaddr_in peer;
+    struct sockaddr_storage peer;
+    socklen_t      peerlen;
     time_t         deadline;
     bep44_tx_cb    cb;
     void          *closure;
 };
 
-static int                s_sock = -1;
+static int                s_sock  = -1;       /* AF_INET UDP */
+static int                s_sock6 = -1;       /* AF_INET6 UDP, -1 if disabled */
 static uint8_t            s_node_id[20];
 static int                s_initialised = 0;
 
@@ -218,22 +220,35 @@ dht_wrap_peek_top(const uint8_t *buf, size_t len, dht_wrap_peek *out)
  * Pending-tx table
  * ============================================================ */
 
+/* Family-aware sockaddr equality (ip + port match, ignoring trailing bytes). */
 static int
-sa_eq(const struct sockaddr_in *a, const struct sockaddr_in *b)
+sa_eq_generic(const struct sockaddr *a, const struct sockaddr *b)
 {
-    return a->sin_addr.s_addr == b->sin_addr.s_addr
-        && a->sin_port        == b->sin_port;
+    if (a->sa_family != b->sa_family) return 0;
+    if (a->sa_family == AF_INET) {
+        const struct sockaddr_in *x = (const struct sockaddr_in *)a;
+        const struct sockaddr_in *y = (const struct sockaddr_in *)b;
+        return x->sin_addr.s_addr == y->sin_addr.s_addr
+            && x->sin_port        == y->sin_port;
+    }
+    if (a->sa_family == AF_INET6) {
+        const struct sockaddr_in6 *x = (const struct sockaddr_in6 *)a;
+        const struct sockaddr_in6 *y = (const struct sockaddr_in6 *)b;
+        return x->sin6_port == y->sin6_port
+            && memcmp(&x->sin6_addr, &y->sin6_addr, sizeof(x->sin6_addr)) == 0;
+    }
+    return 0;
 }
 
 static struct pending_tx *
 pending_find_match(const uint8_t *tid, size_t tid_len,
-                   const struct sockaddr_in *peer)
+                   const struct sockaddr *peer)
 {
     if (tid_len != 2) return NULL;
     for (size_t i = 0; i < MAX_PENDING_TX; i++) {
         if (!s_pending[i].in_use) continue;
         if (s_pending[i].tid[0] != tid[0] || s_pending[i].tid[1] != tid[1]) continue;
-        if (!sa_eq(&s_pending[i].peer, peer)) continue;
+        if (!sa_eq_generic((const struct sockaddr *)&s_pending[i].peer, peer)) continue;
         return &s_pending[i];
     }
     return NULL;
@@ -248,15 +263,18 @@ pending_release(struct pending_tx *t)
 }
 
 static int
-pending_register(const uint8_t tid[2], const struct sockaddr_in *peer,
+pending_register(const uint8_t tid[2],
+                 const struct sockaddr *peer, socklen_t peerlen,
                  int timeout_ms, bep44_tx_cb cb, void *closure)
 {
+    if (peerlen > (socklen_t)sizeof(struct sockaddr_storage)) return -1;
     for (size_t i = 0; i < MAX_PENDING_TX; i++) {
         if (s_pending[i].in_use) continue;
         s_pending[i].in_use = 1;
         s_pending[i].tid[0] = tid[0];
         s_pending[i].tid[1] = tid[1];
-        s_pending[i].peer = *peer;
+        memcpy(&s_pending[i].peer, peer, peerlen);
+        s_pending[i].peerlen = peerlen;
         s_pending[i].deadline = time(NULL) + (timeout_ms + 999) / 1000;
         s_pending[i].cb = cb;
         s_pending[i].closure = closure;
@@ -275,10 +293,11 @@ pending_sweep(void)
         if (s_pending[i].deadline > now) continue;
         bep44_tx_cb  cb = s_pending[i].cb;
         void        *cl = s_pending[i].closure;
-        struct sockaddr_in peer = s_pending[i].peer;
+        struct sockaddr_storage peer = s_pending[i].peer;
+        socklen_t peerlen = s_pending[i].peerlen;
         pending_release(&s_pending[i]);
         if (cb) cb(BEP44_TX_TIMEOUT,
-                   (const struct sockaddr *)&peer, (int)sizeof(peer),
+                   (const struct sockaddr *)&peer, (int)peerlen,
                    NULL, NULL, cl);
     }
 }
@@ -312,8 +331,55 @@ dht_wrap_random_tid(uint8_t out[2])
  * Lifecycle
  * ============================================================ */
 
+/* Helper: open a non-blocking UDP socket of the given family, bound to port.
+ * Returns fd on success, -1 on failure (errno preserved). For AF_INET6 we
+ * set IPV6_V6ONLY=1 so v4-mapped traffic doesn't double-count. */
+static int
+udp_bind(int family, uint16_t port)
+{
+    int fd = socket(family, SOCK_DGRAM, 0);
+    if (fd < 0) return -1;
+
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+        int e = errno; close(fd); errno = e; return -1;
+    }
+
+    if (family == AF_INET6) {
+        int v6only = 1;
+        setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &v6only, sizeof(v6only));
+    }
+
+    struct sockaddr_storage ss;
+    memset(&ss, 0, sizeof(ss));
+    socklen_t slen;
+    if (family == AF_INET) {
+        struct sockaddr_in *a = (struct sockaddr_in *)&ss;
+        a->sin_family = AF_INET;
+        a->sin_addr.s_addr = htonl(INADDR_ANY);
+        a->sin_port = htons(port);
+        slen = sizeof(*a);
+    } else {
+        struct sockaddr_in6 *a = (struct sockaddr_in6 *)&ss;
+        a->sin6_family = AF_INET6;
+        a->sin6_addr = in6addr_any;
+        a->sin6_port = htons(port);
+        slen = sizeof(*a);
+    }
+    if (bind(fd, (struct sockaddr *)&ss, slen) < 0) {
+        int e = errno; close(fd); errno = e; return -1;
+    }
+    return fd;
+}
+
 int
 dht_wrap_init(uint16_t port)
+{
+    return dht_wrap_init_opt(port, /*want_ipv6=*/1);
+}
+
+int
+dht_wrap_init_opt(uint16_t port, int want_ipv6)
 {
     if (s_initialised) {
         fprintf(stderr, "[dht44:dht_wrap] already initialised\n");
@@ -325,34 +391,24 @@ dht_wrap_init(uint16_t port)
     }
     memset(s_pending, 0, sizeof(s_pending));
 
-    s_sock = socket(AF_INET, SOCK_DGRAM, 0);
+    s_sock = udp_bind(AF_INET, port);
     if (s_sock < 0) {
-        fprintf(stderr, "[dht44:dht_wrap] socket: %s\n", strerror(errno));
-        return -1;
-    }
-    int flags = fcntl(s_sock, F_GETFL, 0);
-    if (flags < 0 || fcntl(s_sock, F_SETFL, flags | O_NONBLOCK) < 0) {
-        fprintf(stderr, "[dht44:dht_wrap] non-blocking: %s\n", strerror(errno));
-        close(s_sock);
-        s_sock = -1;
+        fprintf(stderr, "[dht44:dht_wrap] bind v4 :%u: %s\n",
+                (unsigned)port, strerror(errno));
         return -1;
     }
 
-    struct sockaddr_in addr = {0};
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_ANY);
-    addr.sin_port = htons(port);
-    if (bind(s_sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        fprintf(stderr, "[dht44:dht_wrap] bind :%u: %s\n",
-                (unsigned)port, strerror(errno));
-        close(s_sock);
-        s_sock = -1;
-        return -1;
+    if (want_ipv6) {
+        s_sock6 = udp_bind(AF_INET6, port);
+        if (s_sock6 < 0) {
+            fprintf(stderr, "[dht44:dht_wrap] bind v6 [::]:%u: %s (continuing v4-only)\n",
+                    (unsigned)port, strerror(errno));
+        }
     }
 
     if (state_get_node_id(s_node_id) < 0) {
-        close(s_sock);
-        s_sock = -1;
+        close(s_sock); s_sock = -1;
+        if (s_sock6 >= 0) { close(s_sock6); s_sock6 = -1; }
         return -1;
     }
 
@@ -361,14 +417,17 @@ dht_wrap_init(uint16_t port)
         extern FILE *dht_debug;
         dht_debug = stderr;
     }
-    /* Version: "DH44" — 4 bytes */
-    if (dht_init(s_sock, -1, s_node_id, (const unsigned char *)"DH44") < 0) {
+    /* Version: "DH44" — 4 bytes. Pass both fds to jech so it maintains a
+     * v4 and v6 routing table; s_sock6 may be -1 if v6 is disabled. */
+    if (dht_init(s_sock, s_sock6, s_node_id, (const unsigned char *)"DH44") < 0) {
         fprintf(stderr, "[dht44:dht_wrap] dht_init failed\n");
-        close(s_sock);
-        s_sock = -1;
+        close(s_sock); s_sock = -1;
+        if (s_sock6 >= 0) { close(s_sock6); s_sock6 = -1; }
         return -1;
     }
     s_initialised = 1;
+    fprintf(stderr, "[dht44:dht_wrap] bound :%u v4%s\n", (unsigned)port,
+            s_sock6 >= 0 ? " + v6" : " (v6 disabled)");
     return 0;
 }
 
@@ -379,16 +438,15 @@ dht_wrap_uninit(void)
         dht_uninit();
         s_initialised = 0;
     }
-    if (s_sock >= 0) {
-        close(s_sock);
-        s_sock = -1;
-    }
+    if (s_sock  >= 0) { close(s_sock);  s_sock  = -1; }
+    if (s_sock6 >= 0) { close(s_sock6); s_sock6 = -1; }
     memset(s_pending, 0, sizeof(s_pending));
     s_query_cb = NULL;
     s_query_cb_closure = NULL;
 }
 
-int dht_wrap_socket(void) { return s_sock; }
+int dht_wrap_socket(void)  { return s_sock;  }
+int dht_wrap_socket6(void) { return s_sock6; }
 const uint8_t *dht_wrap_node_id(void) { return s_node_id; }
 
 void
@@ -418,7 +476,8 @@ dht_wrap_ping_routers(void)
     if (!s_initialised) return -1;
     int pinged = 0;
     for (size_t i = 0; i < sizeof(ROUTERS) / sizeof(ROUTERS[0]); i++) {
-        struct addrinfo hints = { .ai_family = AF_INET, .ai_socktype = SOCK_DGRAM };
+        /* Resolve both A and AAAA so v6 routers get pinged over s_sock6. */
+        struct addrinfo hints = { .ai_family = AF_UNSPEC, .ai_socktype = SOCK_DGRAM };
         struct addrinfo *res = NULL;
         int rc = getaddrinfo(ROUTERS[i].host, ROUTERS[i].port, &hints, &res);
         if (rc != 0) {
@@ -426,10 +485,15 @@ dht_wrap_ping_routers(void)
                     ROUTERS[i].host, gai_strerror(rc));
             continue;
         }
+        int v4_done = 0, v6_done = 0;
         for (struct addrinfo *ai = res; ai; ai = ai->ai_next) {
+            if (ai->ai_family == AF_INET  && v4_done) continue;
+            if (ai->ai_family == AF_INET6 && v6_done) continue;
+            if (ai->ai_family == AF_INET6 && s_sock6 < 0) continue;
             if (dht_ping_node(ai->ai_addr, (int)ai->ai_addrlen) >= 0) {
                 pinged++;
-                break;     /* one address per host is enough */
+                if (ai->ai_family == AF_INET)  v4_done = 1;
+                if (ai->ai_family == AF_INET6) v6_done = 1;
             }
         }
         freeaddrinfo(res);
@@ -447,11 +511,27 @@ dht_wrap_insert_warm(const struct sockaddr_in *sa)
     return dht_ping_node((const struct sockaddr *)sa, (int)sizeof(*sa));
 }
 
+int
+dht_wrap_insert_warm6(const struct sockaddr_in6 *sa)
+{
+    if (!s_initialised || s_sock6 < 0) return -1;
+    return dht_ping_node((const struct sockaddr *)sa, (int)sizeof(*sa));
+}
+
 void
 dht_wrap_status(int *good, int *dubious)
 {
     int g = 0, d = 0, c = 0, in = 0;
     if (s_initialised) dht_nodes(AF_INET, &g, &d, &c, &in);
+    if (good)    *good    = g;
+    if (dubious) *dubious = d;
+}
+
+void
+dht_wrap_status6(int *good, int *dubious)
+{
+    int g = 0, d = 0, c = 0, in = 0;
+    if (s_initialised && s_sock6 >= 0) dht_nodes(AF_INET6, &g, &d, &c, &in);
     if (good)    *good    = g;
     if (dubious) *dubious = d;
 }
@@ -467,6 +547,16 @@ dht_wrap_get_nodes(struct sockaddr_in *out, int max)
 }
 
 int
+dht_wrap_get_nodes6(struct sockaddr_in6 *out, int max)
+{
+    if (!s_initialised || s_sock6 < 0 || max <= 0) return 0;
+    int n4 = 0;
+    int n6 = max;
+    if (dht_get_nodes(NULL, &n4, out, &n6) < 0) return 0;
+    return n6;
+}
+
+int
 dht_wrap_closest_to(const uint8_t target[20],
                     struct sockaddr_in *out,
                     uint8_t (*out_ids)[20],
@@ -474,6 +564,16 @@ dht_wrap_closest_to(const uint8_t target[20],
 {
     if (!s_initialised || max <= 0) return 0;
     return dht_closest_nodes(target, AF_INET, out, NULL, out_ids, max);
+}
+
+int
+dht_wrap_closest6_to(const uint8_t target[20],
+                     struct sockaddr_in6 *out,
+                     uint8_t (*out_ids)[20],
+                     int max)
+{
+    if (!s_initialised || s_sock6 < 0 || max <= 0) return 0;
+    return dht_closest_nodes(target, AF_INET6, NULL, out, out_ids, max);
 }
 
 int
@@ -512,31 +612,33 @@ dispatch_query(const struct sockaddr *peer, int peerlen,
 }
 
 static void
-dispatch_response(const struct sockaddr_in *peer,
+dispatch_response(const struct sockaddr *peer, int peerlen,
                   const dht_wrap_peek *p,
                   const uint8_t *buf, size_t len,
                   int is_error)
 {
+    (void)peerlen;
     struct pending_tx *t = pending_find_match(p->t, p->t_len, peer);
     if (!t) return;     /* not ours, or already fired */
 
     bep44_tx_cb cb = t->cb;
     void *closure = t->closure;
-    struct sockaddr_in saved = t->peer;
+    struct sockaddr_storage saved = t->peer;
+    socklen_t savedlen = t->peerlen;
     pending_release(t);
 
     bencode_arena *a;
     bencode_value *root = bencode_parse(buf, len, &a);
     if (!root) {
         if (cb) cb(is_error ? BEP44_TX_ERROR : BEP44_TX_RESPONSE,
-                   (const struct sockaddr *)&saved, (int)sizeof(saved),
+                   (const struct sockaddr *)&saved, (int)savedlen,
                    NULL, NULL, closure);
         return;
     }
     const bencode_value *r = bencode_dict_get(root, "r");
     const bencode_value *e = bencode_dict_get(root, "e");
     if (cb) cb(is_error ? BEP44_TX_ERROR : BEP44_TX_RESPONSE,
-               (const struct sockaddr *)&saved, (int)sizeof(saved),
+               (const struct sockaddr *)&saved, (int)savedlen,
                r, e, closure);
     bencode_free(a);
 }
@@ -553,7 +655,8 @@ static int
 maybe_handle_bep44(const uint8_t *buf, size_t len,
                    const struct sockaddr *from, int fromlen)
 {
-    if (fromlen != (int)sizeof(struct sockaddr_in)) return 0;   /* IPv4 only */
+    if (fromlen != (int)sizeof(struct sockaddr_in)
+        && fromlen != (int)sizeof(struct sockaddr_in6)) return 0;
     dht_wrap_peek p;
     if (dht_wrap_peek_top(buf, len, &p) < 0) return 0;
 
@@ -568,9 +671,8 @@ maybe_handle_bep44(const uint8_t *buf, size_t len,
         return 0;
     }
     if (p.y[0] == 'r' || p.y[0] == 'e') {
-        const struct sockaddr_in *peer = (const struct sockaddr_in *)from;
-        if (pending_find_match(p.t, p.t_len, peer)) {
-            dispatch_response(peer, &p, buf, len, p.y[0] == 'e');
+        if (pending_find_match(p.t, p.t_len, from)) {
+            dispatch_response(from, fromlen, &p, buf, len, p.y[0] == 'e');
             return 1;
         }
     }
@@ -630,8 +732,13 @@ int
 dht_wrap_sendto(const struct sockaddr *peer, int peerlen,
                 const void *packet, size_t packet_len)
 {
-    if (s_sock < 0) return -1;
-    ssize_t w = sendto(s_sock, packet, packet_len, 0, peer, (socklen_t)peerlen);
+    /* Route to the socket that matches the destination family. */
+    int fd = -1;
+    if (peer->sa_family == AF_INET)  fd = s_sock;
+    if (peer->sa_family == AF_INET6) fd = s_sock6;
+    if (fd < 0) return -1;
+
+    ssize_t w = sendto(fd, packet, packet_len, 0, peer, (socklen_t)peerlen);
     if (w < 0) {
         fprintf(stderr, "[dht44:dht_wrap] sendto: %s\n", strerror(errno));
         return -1;
@@ -646,16 +753,17 @@ dht_wrap_send_query(const struct sockaddr *peer, int peerlen,
                     int timeout_ms,
                     bep44_tx_cb cb, void *closure)
 {
-    if (peerlen != (int)sizeof(struct sockaddr_in) || tid_len != 2) return -1;
-    if (pending_register(tid, (const struct sockaddr_in *)peer,
+    if (tid_len != 2) return -1;
+    if (peerlen != (int)sizeof(struct sockaddr_in)
+        && peerlen != (int)sizeof(struct sockaddr_in6)) return -1;
+    if (pending_register(tid, peer, (socklen_t)peerlen,
                          timeout_ms, cb, closure) < 0) {
         return -1;
     }
     if (dht_wrap_sendto(peer, peerlen, packet, packet_len) < 0) {
         /* roll back the registration so the callback isn't fired on an
          * unrelated future packet that happens to match */
-        struct pending_tx *t = pending_find_match(tid, tid_len,
-                                                  (const struct sockaddr_in *)peer);
+        struct pending_tx *t = pending_find_match(tid, tid_len, peer);
         if (t) pending_release(t);
         return -1;
     }
