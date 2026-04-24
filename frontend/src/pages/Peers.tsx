@@ -10,6 +10,10 @@ type Row = {
   first_seen: number; last_seen: number;
   rtt_ms: number | null;
   queries_in: number; queries_out: number;
+  as_src?: number;
+  as_dst?: number;
+  same_ip?: number;
+  likely_crawler?: number;
   geo?: Geo;
 };
 
@@ -141,6 +145,7 @@ export default function Peers() {
             <th>client</th>
             <th>rtt</th>
             <th>in / out</th>
+            <th>edges s/d</th>
             <th>node id</th>
             <th>last seen</th>
           </tr>
@@ -150,9 +155,29 @@ export default function Peers() {
             const iso  = r.geo?.country;
             const flag = countryFlag(iso);
             const name = countryName(iso);
+            const crawler = !!r.likely_crawler;
+            const reason = [
+              r.as_dst === 0 && (r.as_src ?? 0) >= 50
+                ? `silent taker: ${r.as_src} queries answered, 0 listings by other peers`
+                : null,
+              (r.same_ip ?? 0) >= 3
+                ? `${r.same_ip} distinct source ports from the same IP`
+                : null,
+            ].filter(Boolean).join(" · ");
             return (
               <tr key={r.ip + ":" + r.port}>
-                <td>{r.ip}:{r.port}</td>
+                <td>
+                  {r.ip}:{r.port}
+                  {crawler && (
+                    <span title={"likely crawler — " + reason}
+                          style={{ marginLeft: 6, padding: "1px 5px",
+                                   background: "#3a2230", color: "#ff9bb5",
+                                   borderRadius: 2, fontSize: 10,
+                                   border: "1px solid #8a3e54" }}>
+                      crawler?
+                    </span>
+                  )}
+                </td>
                 <td className="geo" title={name || undefined}>
                   {flag && <span style={{ marginRight: 6, fontSize: 15 }}>{flag}</span>}
                   {iso || ""}{r.geo?.city ? " · " + r.geo.city : ""}
@@ -166,6 +191,9 @@ export default function Peers() {
                   {r.rtt_ms != null ? r.rtt_ms + "ms" : "—"}
                 </td>
                 <td>{r.queries_in} / {r.queries_out}</td>
+                <td className={r.as_dst === 0 && (r.as_src ?? 0) > 0 ? "bad" : "dim"}>
+                  {r.as_src ?? 0} / {r.as_dst ?? 0}
+                </td>
                 <td className="hex">{hex(r.node_id || "", 20)}</td>
                 <td>{fmtTs(r.last_seen)}</td>
               </tr>

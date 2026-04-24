@@ -14,6 +14,10 @@ type Node = {
   deg: number;
   v_string?: string | null;
   country?: string | null;
+  as_src?: number;
+  as_dst?: number;
+  same_ip?: number;
+  likely_crawler?: number;
 
   /* sim state */
   x: number; y: number; vx: number; vy: number; r: number;
@@ -57,6 +61,8 @@ export default function Graph() {
       const nodes: Node[] = (g.nodes || []).map((n: any, i: number) => ({
         id: n.id, ip: n.ip, port: n.port, deg: n.deg,
         v_string: n.v_string, country: n.country,
+        as_src: n.as_src, as_dst: n.as_dst, same_ip: n.same_ip,
+        likely_crawler: n.likely_crawler,
         x: Math.cos((i / N) * Math.PI * 2) * R * (0.6 + 0.4 * Math.random()),
         y: Math.sin((i / N) * Math.PI * 2) * R * (0.6 + 0.4 * Math.random()),
         vx: 0, vy: 0,
@@ -220,6 +226,14 @@ export default function Graph() {
         ctx.arc(n.x, n.y, n.r, 0, Math.PI * 2);
         ctx.fillStyle = colorFor(n.country);
         ctx.fill();
+        /* Crawler ring: dashed red outline on peers flagged by the heuristic. */
+        if (n.likely_crawler) {
+          ctx.lineWidth = 1.6;
+          ctx.strokeStyle = "rgba(255, 90, 120, 0.95)";
+          ctx.setLineDash([3, 2]);
+          ctx.stroke();
+          ctx.setLineDash([]);
+        }
         if (n === hover || n === drag) {
           ctx.lineWidth = 1.4;
           ctx.strokeStyle = "#fff";
@@ -350,7 +364,22 @@ export default function Graph() {
                 {hover.v_string ? decodeVString(hover.v_string) : <span className="dim">unknown client</span>}
               </span>
             </div>
-            <div className="small">degree {hover.deg} · {hex(hover.id, 28)}</div>
+            <div className="small">
+              degree {hover.deg}
+              {hover.as_src != null && hover.as_dst != null &&
+                ` · s:${hover.as_src} d:${hover.as_dst}`}
+              {(hover.same_ip ?? 0) >= 2 && ` · ${hover.same_ip} ports/ip`}
+            </div>
+            {!!hover.likely_crawler && (
+              <div style={{ color: "#ff9bb5", marginTop: 3 }}>
+                likely crawler
+                {hover.as_dst === 0 && (hover.as_src ?? 0) >= 50
+                  ? " — silent taker" : ""}
+                {(hover.same_ip ?? 0) >= 3
+                  ? " — multi-port host" : ""}
+              </div>
+            )}
+            <div className="small">{hex(hover.id, 28)}</div>
           </div>
         )}
 
@@ -423,6 +452,20 @@ export default function Graph() {
               <div style={{ color: "#a0a8b0", marginBottom: 8 }}>
                 hover/drag a bubble → its edges light up
                 to show that peer's neighbors.
+              </div>
+
+              <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
+                <svg width="20" height="16">
+                  <circle cx="10" cy="8" r="6" fill="hsl(210 62% 55%)"
+                          stroke="rgba(255,90,120,.95)" strokeWidth="1.5"
+                          strokeDasharray="3,2"/>
+                </svg>
+                <b style={{ color: "#ff9bb5", marginLeft: 4 }}>red ring</b>
+              </div>
+              <div style={{ color: "#a0a8b0", marginBottom: 8 }}>
+                likely crawler: never kept by others (as_dst=0)
+                AND answered us 50+ times, or ≥3 source ports
+                from one IP.
               </div>
 
               <div style={{ color: "#8fc0ff", fontSize: 10, letterSpacing: 0.5,

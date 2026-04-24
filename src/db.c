@@ -389,6 +389,17 @@ row_peer(sqlite3_stmt *s, void *ctx)
     json_object_set_new(o, "rtt_ms",     sqlite3_column_type(s, 8) == SQLITE_NULL ? json_null() : json_integer(sqlite3_column_int(s, 8)));
     json_object_set_new(o, "queries_in",  json_integer(sqlite3_column_int64(s, 9)));
     json_object_set_new(o, "queries_out", json_integer(sqlite3_column_int64(s, 10)));
+    /* Edge-count extras (columns 11-13) only present when the query JOINed
+     * against edges. Extract defensively so row_peer remains reusable. */
+    int cols = sqlite3_column_count(s);
+    int64_t as_src = cols > 11 ? sqlite3_column_int64(s, 11) : 0;
+    int64_t as_dst = cols > 12 ? sqlite3_column_int64(s, 12) : 0;
+    int64_t same_ip = cols > 13 ? sqlite3_column_int64(s, 13) : 0;
+    json_object_set_new(o, "as_src",       json_integer(as_src));
+    json_object_set_new(o, "as_dst",       json_integer(as_dst));
+    json_object_set_new(o, "same_ip",      json_integer(same_ip));
+    int crawler = (as_dst == 0 && as_src >= 50) || same_ip >= 3;
+    json_object_set_new(o, "likely_crawler", json_integer(crawler ? 1 : 0));
     return o;
 }
 
@@ -452,11 +463,29 @@ db_select_peers_json(int limit, const char *order)
     if (order && strcmp(order, "rtt")       == 0) ord = "rtt_ms_ewma ASC";
     if (order && strcmp(order, "queries")   == 0) ord = "(queries_in+queries_out) DESC";
 
-    char sql[512];
+    /* Left-join the peer row against per-peer edge counts (as_src / as_dst)
+     * and a per-IP port-count. These drive the "likely crawler" heuristic on
+     * the UI:   as_dst == 0 && as_src >= 50          → never in anyone's
+     *                                                  routing table despite
+     *                                                  answering us a lot
+     *          same_ip_count >= 3                    → many source ports from
+     *                                                  the same host
+     */
+    char sql[2048];
     snprintf(sql, sizeof(sql),
-        "SELECT ip,port,node_id,v_string,ro,bep42_ok,first_seen,last_seen,"
-        "       rtt_ms_ewma,queries_in,queries_out"
-        " FROM peers ORDER BY %s LIMIT ?", ord);
+        "WITH src AS (SELECT src_ip ip, src_port port, COUNT(*) c FROM edges GROUP BY 1,2),"
+        "     dst AS (SELECT dst_ip ip, dst_port port, COUNT(*) c FROM edges GROUP BY 1,2),"
+        "     ipc AS (SELECT ip,               COUNT(*) c FROM peers GROUP BY 1)"
+        " SELECT p.ip, p.port, p.node_id, p.v_string, p.ro, p.bep42_ok,"
+        "        p.first_seen, p.last_seen, p.rtt_ms_ewma,"
+        "        p.queries_in, p.queries_out,"
+        "        COALESCE(s.c,0) AS as_src, COALESCE(d.c,0) AS as_dst,"
+        "        COALESCE(ipc.c,0) AS same_ip"
+        "   FROM peers p"
+        "   LEFT JOIN src  s ON s.ip=p.ip  AND s.port=p.port"
+        "   LEFT JOIN dst  d ON d.ip=p.ip  AND d.port=p.port"
+        "   LEFT JOIN ipc  ON ipc.ip=p.ip"
+        "  ORDER BY %s LIMIT ?", ord);
     struct limit_ctx c = { limit };
     return run_select(sql, bind_limit, row_peer, &c);
 }
@@ -533,14 +562,24 @@ db_select_graph_json(int limit)
      * Use a CTE to express the union count, then a final LIMIT. */
     sqlite3_stmt *s = NULL;
     const char *sql_top =
-        "WITH d AS ("
-        "  SELECT src_ip AS ip, src_port AS port FROM edges"
-        "  UNION ALL"
-        "  SELECT dst_ip,        dst_port          FROM edges)"
-        " SELECT d.ip, d.port, COUNT(*) AS deg,"
-        "        p.v_string"
-        "   FROM d LEFT JOIN peers p ON p.ip=d.ip AND p.port=d.port"
-        "  GROUP BY d.ip, d.port"
+        "WITH src AS (SELECT src_ip ip, src_port port, COUNT(*) c FROM edges GROUP BY 1,2),"
+        "     dst AS (SELECT dst_ip ip, dst_port port, COUNT(*) c FROM edges GROUP BY 1,2),"
+        "     ipc AS (SELECT ip, COUNT(*) c FROM peers GROUP BY 1),"
+        "     all_nodes AS ("
+        "       SELECT ip, port FROM src"
+        "       UNION"
+        "       SELECT ip, port FROM dst)"
+        " SELECT a.ip, a.port,"
+        "        COALESCE(src.c,0) + COALESCE(dst.c,0) AS deg,"
+        "        p.v_string,"
+        "        COALESCE(src.c,0) AS as_src,"
+        "        COALESCE(dst.c,0) AS as_dst,"
+        "        COALESCE(ipc.c,0) AS same_ip"
+        "   FROM all_nodes a"
+        "   LEFT JOIN src  ON src.ip=a.ip  AND src.port=a.port"
+        "   LEFT JOIN dst  ON dst.ip=a.ip  AND dst.port=a.port"
+        "   LEFT JOIN peers p ON p.ip=a.ip AND p.port=a.port"
+        "   LEFT JOIN ipc  ON ipc.ip=a.ip"
         "  ORDER BY deg DESC LIMIT ?";
     if (sqlite3_prepare_v2(g_db, sql_top, -1, &s, NULL) != SQLITE_OK) {
         log_err("prepare graph-top"); return NULL;
@@ -558,6 +597,9 @@ db_select_graph_json(int limit)
         int deg        = sqlite3_column_int(s, 2);
         const void *v  = sqlite3_column_blob(s, 3);
         int v_len      = sqlite3_column_bytes(s, 3);
+        int64_t as_src  = sqlite3_column_int64(s, 4);
+        int64_t as_dst  = sqlite3_column_int64(s, 5);
+        int64_t same_ip = sqlite3_column_int64(s, 6);
 
         char id[INET_ADDRSTRLEN + 8];
         snprintf(id, sizeof(id), "%s:%d", ip, port);
@@ -568,6 +610,11 @@ db_select_graph_json(int limit)
         json_object_set_new(o, "port", json_integer(port));
         json_object_set_new(o, "deg",  json_integer(deg));
         json_set_blob_hex(o, "v_string", v, v_len);
+        json_object_set_new(o, "as_src",  json_integer(as_src));
+        json_object_set_new(o, "as_dst",  json_integer(as_dst));
+        json_object_set_new(o, "same_ip", json_integer(same_ip));
+        int crawler = (as_dst == 0 && as_src >= 50) || same_ip >= 3;
+        json_object_set_new(o, "likely_crawler", json_integer(crawler ? 1 : 0));
         json_array_append_new(nodes, o);
 
         if (set_n < limit) {

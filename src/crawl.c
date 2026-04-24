@@ -55,6 +55,49 @@ static int           g_pkts_this_sec = 0;
 static time_t        g_sec_mark      = 0;
 static int           g_enabled       = 0;
 
+/* ------------------------------------------------------------------
+ * "Recently asked" penalty: keep a small LRU of (peer, timestamp) so
+ * a single hot peer doesn't get re-probed by every worker every walk.
+ * A peer within RECENT_COOLDOWN_S is skipped when picking the next
+ * candidate, so the crawler fans out more broadly.
+ * ------------------------------------------------------------------ */
+#define RECENT_CAP           1024         /* must be power of 2 */
+#define RECENT_COOLDOWN_S    30
+
+struct recent_entry {
+    struct sockaddr_in peer;
+    time_t             ts;
+    int                in_use;
+};
+static struct recent_entry g_recent[RECENT_CAP];
+static int                 g_recent_next = 0;      /* FIFO index */
+
+static int
+recent_is_hot(const struct sockaddr_in *p)
+{
+    time_t cutoff = time(NULL) - RECENT_COOLDOWN_S;
+    for (int i = 0; i < RECENT_CAP; i++) {
+        const struct recent_entry *r = &g_recent[i];
+        if (!r->in_use) continue;
+        if (r->ts < cutoff) continue;
+        if (r->peer.sin_addr.s_addr == p->sin_addr.s_addr
+            && r->peer.sin_port     == p->sin_port) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void
+recent_mark(const struct sockaddr_in *p)
+{
+    int i = g_recent_next;
+    g_recent[i].peer   = *p;
+    g_recent[i].ts     = time(NULL);
+    g_recent[i].in_use = 1;
+    g_recent_next      = (i + 1) % RECENT_CAP;
+}
+
 /* ============================================================
  * XOR distance + shortlist
  * ============================================================ */
@@ -134,6 +177,14 @@ sl_insert(struct worker *w, const struct sockaddr_in *peer,
 static int
 pick_next_fresh(struct worker *w)
 {
+    /* First pass: prefer fresh candidates that aren't on cooldown. */
+    for (int i = 0; i < w->sl_count; i++) {
+        if (w->sl[i].state != CAND_FRESH) continue;
+        if (recent_is_hot(&w->sl[i].peer)) continue;
+        return i;
+    }
+    /* Fallback: if every fresh candidate is on cooldown, use one anyway so
+     * the walk doesn't stall. Better to re-probe than to freeze. */
     for (int i = 0; i < w->sl_count; i++) {
         if (w->sl[i].state == CAND_FRESH) return i;
     }
@@ -318,6 +369,7 @@ worker_send_probe(struct worker *w)
     w->in_flight = 1;
     w->hops++;
     g_pkts_this_sec++;
+    recent_mark(&c->peer);
 }
 
 /* ============================================================
