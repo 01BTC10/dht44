@@ -476,9 +476,11 @@ dispatch_http(struct lws *wsi)
     int  uri_len = lws_hdr_copy(wsi, uri, sizeof(uri), WSI_TOKEN_GET_URI);
     if (uri_len <= 0) return lws_return_http_status(wsi, 400, NULL);
 
-    /* Split path / query-string */
-    char *qs = strchr(uri, '?');
-    if (qs) { *qs = 0; qs++; }
+    /* libwebsockets gives path + query string in SEPARATE tokens. */
+    char qsbuf[512];
+    int  qs_len = lws_hdr_copy(wsi, qsbuf, sizeof(qsbuf),
+                               WSI_TOKEN_HTTP_URI_ARGS);
+    char *qs = qs_len > 0 ? qsbuf : NULL;
 
     /* Routes */
     if (strcmp(uri, "/") == 0) {
@@ -563,6 +565,35 @@ dispatch_http(struct lws *wsi)
     if (strcmp(uri, "/api/country-stats") == 0) {
         char *body = country_stats_json(limit);
         int rc = send_json_response(wsi, body ? body : "{}");
+        free(body);
+        return rc;
+    }
+    if (strcmp(uri, "/api/graph") == 0) {
+        char *body = db_select_graph_json(limit);
+        /* Enrich each node with country ISO (if GeoIP loaded). */
+        if (body && g_city_ok) {
+            json_error_t err;
+            json_t *env = json_loads(body, 0, &err);
+            free(body);
+            body = NULL;
+            if (env) {
+                json_t *nodes = json_object_get(env, "nodes");
+                size_t i; json_t *n;
+                json_array_foreach(nodes, i, n) {
+                    const char *ip = json_string_value(json_object_get(n, "ip"));
+                    if (!ip) continue;
+                    json_t *geo = geoip_lookup(ip);
+                    if (geo) {
+                        const char *c = json_string_value(json_object_get(geo, "country"));
+                        if (c) json_object_set_new(n, "country", json_string(c));
+                        json_decref(geo);
+                    }
+                }
+                body = json_dumps(env, JSON_COMPACT);
+                json_decref(env);
+            }
+        }
+        int rc = send_json_response(wsi, body ? body : "{\"nodes\":[],\"links\":[]}");
         free(body);
         return rc;
     }

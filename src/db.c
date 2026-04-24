@@ -19,6 +19,7 @@ static sqlite3_stmt *g_upd_peer_count = NULL;
 static sqlite3_stmt *g_ins_query      = NULL;
 static sqlite3_stmt *g_ins_infohash   = NULL;
 static sqlite3_stmt *g_ins_bep44      = NULL;
+static sqlite3_stmt *g_ins_edge       = NULL;
 
 #define TAG "[dht44:db] "
 
@@ -87,6 +88,11 @@ prepare_all(void)
         "   sig       = COALESCE(excluded.sig, sig),"
         "   v         = excluded.v,"
         "   last_seen = excluded.last_seen";
+    static const char *S_INS_EDGE =
+        "INSERT INTO edges(src_ip,src_port,dst_ip,dst_port,last_seen)"
+        " VALUES(?,?,?,?,?)"
+        " ON CONFLICT(src_ip,src_port,dst_ip,dst_port) DO UPDATE SET"
+        "   last_seen = excluded.last_seen";
 
     struct { sqlite3_stmt **slot; const char *sql; } items[] = {
         { &g_ins_peer,       S_INS_PEER },
@@ -94,6 +100,7 @@ prepare_all(void)
         { &g_ins_query,      S_INS_QUERY },
         { &g_ins_infohash,   S_INS_INFOHASH },
         { &g_ins_bep44,      S_INS_BEP44 },
+        { &g_ins_edge,       S_INS_EDGE },
     };
     for (size_t i = 0; i < sizeof(items)/sizeof(items[0]); i++) {
         if (sqlite3_prepare_v2(g_db, items[i].sql, -1, items[i].slot, NULL)
@@ -142,7 +149,14 @@ db_open(const char *path)
         "CREATE TABLE IF NOT EXISTS bep44_items ("
         "  target BLOB PRIMARY KEY, mutable INTEGER NOT NULL,"
         "  pk BLOB, salt BLOB, seq INTEGER, sig BLOB, v BLOB NOT NULL,"
-        "  first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL);";
+        "  first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL);"
+        "CREATE TABLE IF NOT EXISTS edges ("
+        "  src_ip TEXT NOT NULL, src_port INTEGER NOT NULL,"
+        "  dst_ip TEXT NOT NULL, dst_port INTEGER NOT NULL,"
+        "  last_seen INTEGER NOT NULL,"
+        "  PRIMARY KEY(src_ip,src_port,dst_ip,dst_port));"
+        "CREATE INDEX IF NOT EXISTS edges_src ON edges(src_ip, src_port);"
+        "CREATE INDEX IF NOT EXISTS edges_dst ON edges(dst_ip, dst_port);";
     if (exec_noret(SCHEMA) < 0) return -1;
     if (prepare_all() < 0) return -1;
     fprintf(stderr, TAG "opened %s\n", path);
@@ -159,6 +173,7 @@ db_close(void)
     sqlite3_finalize(g_ins_query);       g_ins_query = NULL;
     sqlite3_finalize(g_ins_infohash);    g_ins_infohash = NULL;
     sqlite3_finalize(g_ins_bep44);       g_ins_bep44 = NULL;
+    sqlite3_finalize(g_ins_edge);        g_ins_edge = NULL;
     sqlite3_close(g_db);                 g_db = NULL;
 }
 
@@ -503,6 +518,112 @@ int64_t db_count_queries(void)    { return scalar_i64("SELECT COUNT(*) FROM quer
 int64_t db_count_infohashes(void) { return scalar_i64("SELECT COUNT(*) FROM infohashes"); }
 int64_t db_count_bep44(void)      { return scalar_i64("SELECT COUNT(*) FROM bep44_items"); }
 
+/* Pull the top-N peers by edge degree and the subgraph of edges between them.
+ * Response shape: { nodes: [...], links: [...] }. Node metadata (country is
+ * NOT included here — GeoIP resolution happens in http_ws.c where the mmdb
+ * handle lives). */
+char *
+db_select_graph_json(int limit)
+{
+    if (!g_db) return NULL;
+    if (limit <= 0) limit = 300;
+    if (limit > 1500) limit = 1500;
+
+    /* Top-N peers by degree: count appearances as src OR dst in edges.
+     * Use a CTE to express the union count, then a final LIMIT. */
+    sqlite3_stmt *s = NULL;
+    const char *sql_top =
+        "WITH d AS ("
+        "  SELECT src_ip AS ip, src_port AS port FROM edges"
+        "  UNION ALL"
+        "  SELECT dst_ip,        dst_port          FROM edges)"
+        " SELECT d.ip, d.port, COUNT(*) AS deg,"
+        "        p.v_string"
+        "   FROM d LEFT JOIN peers p ON p.ip=d.ip AND p.port=d.port"
+        "  GROUP BY d.ip, d.port"
+        "  ORDER BY deg DESC LIMIT ?";
+    if (sqlite3_prepare_v2(g_db, sql_top, -1, &s, NULL) != SQLITE_OK) {
+        log_err("prepare graph-top"); return NULL;
+    }
+    sqlite3_bind_int(s, 1, limit);
+
+    json_t *nodes = json_array();
+    /* collect a set of (ip, port) for subsequent edge filter */
+    typedef struct { char ip[INET_ADDRSTRLEN]; int port; } nk;
+    nk *set = calloc((size_t)limit, sizeof(*set));
+    int set_n = 0;
+    while (set && sqlite3_step(s) == SQLITE_ROW) {
+        const char *ip = (const char *)sqlite3_column_text(s, 0);
+        int port       = sqlite3_column_int(s, 1);
+        int deg        = sqlite3_column_int(s, 2);
+        const void *v  = sqlite3_column_blob(s, 3);
+        int v_len      = sqlite3_column_bytes(s, 3);
+
+        char id[INET_ADDRSTRLEN + 8];
+        snprintf(id, sizeof(id), "%s:%d", ip, port);
+
+        json_t *o = json_object();
+        json_object_set_new(o, "id",   json_string(id));
+        json_object_set_new(o, "ip",   json_string(ip));
+        json_object_set_new(o, "port", json_integer(port));
+        json_object_set_new(o, "deg",  json_integer(deg));
+        json_set_blob_hex(o, "v_string", v, v_len);
+        json_array_append_new(nodes, o);
+
+        if (set_n < limit) {
+            snprintf(set[set_n].ip, sizeof(set[set_n].ip), "%s", ip);
+            set[set_n].port = port;
+            set_n++;
+        }
+    }
+    sqlite3_finalize(s);
+
+    /* Fetch edges among the set. Simpler and still fast at this scale: pull
+     * all edges and filter in-process via a small open-hash lookup. */
+    json_t *links = json_array();
+    sqlite3_stmt *e = NULL;
+    if (sqlite3_prepare_v2(g_db,
+            "SELECT src_ip,src_port,dst_ip,dst_port FROM edges",
+            -1, &e, NULL) == SQLITE_OK) {
+
+        /* build a sorted search index for O(log n) endpoint membership */
+        int (*find)(const char *ip, int port, nk *tbl, int n) =
+            NULL; (void)find;
+
+        while (set && sqlite3_step(e) == SQLITE_ROW) {
+            const char *sip = (const char *)sqlite3_column_text(e, 0);
+            int sport = sqlite3_column_int(e, 1);
+            const char *dip = (const char *)sqlite3_column_text(e, 2);
+            int dport = sqlite3_column_int(e, 3);
+
+            int sok = 0, dok = 0;
+            for (int i = 0; i < set_n; i++) {
+                if (!sok && set[i].port == sport && strcmp(set[i].ip, sip)==0) sok = 1;
+                if (!dok && set[i].port == dport && strcmp(set[i].ip, dip)==0) dok = 1;
+                if (sok && dok) break;
+            }
+            if (sok && dok) {
+                char sbuf[INET_ADDRSTRLEN+8], dbuf[INET_ADDRSTRLEN+8];
+                snprintf(sbuf, sizeof(sbuf), "%s:%d", sip, sport);
+                snprintf(dbuf, sizeof(dbuf), "%s:%d", dip, dport);
+                json_t *lo = json_object();
+                json_object_set_new(lo, "src", json_string(sbuf));
+                json_object_set_new(lo, "dst", json_string(dbuf));
+                json_array_append_new(links, lo);
+            }
+        }
+        sqlite3_finalize(e);
+    }
+    free(set);
+
+    json_t *env = json_object();
+    json_object_set_new(env, "nodes", nodes);
+    json_object_set_new(env, "links", links);
+    char *js = json_dumps(env, JSON_COMPACT);
+    json_decref(env);
+    return js;
+}
+
 char *
 db_select_client_stats_json(int limit)
 {
@@ -542,6 +663,27 @@ db_select_client_stats_json(int limit)
     char *js = json_dumps(env, JSON_COMPACT);
     json_decref(env);
     return js;
+}
+
+void
+db_upsert_edge(const struct sockaddr_in *src, const struct sockaddr_in *dst)
+{
+    if (!g_db || !src || !dst) return;
+    tx_begin_if_needed();
+
+    char sip[INET_ADDRSTRLEN], dip[INET_ADDRSTRLEN];
+    int  sport, dport;
+    peer_key(src, sip, sizeof(sip), &sport);
+    peer_key(dst, dip, sizeof(dip), &dport);
+
+    sqlite3_stmt *s = g_ins_edge;
+    sqlite3_reset(s);
+    sqlite3_bind_text (s, 1, sip, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int  (s, 2, sport);
+    sqlite3_bind_text (s, 3, dip, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int  (s, 4, dport);
+    sqlite3_bind_int64(s, 5, (int64_t)time(NULL));
+    if (sqlite3_step(s) != SQLITE_DONE) log_err("upsert edge");
 }
 
 int

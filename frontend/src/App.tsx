@@ -4,13 +4,14 @@ import Peers from "./pages/Peers";
 import Queries from "./pages/Queries";
 import Infohashes from "./pages/Infohashes";
 import Bep44 from "./pages/Bep44";
+import Graph from "./pages/Graph";
 
 type Stats = {
   peers: number; queries: number; infohashes: number;
   bep44_items: number; queries_per_min: number;
 };
 
-type Tab = "peers" | "queries" | "infohashes" | "bep44";
+type Tab = "peers" | "queries" | "infohashes" | "bep44" | "graph";
 
 export default function App() {
   const [tab, setTab] = useState<Tab>("peers");
@@ -42,7 +43,7 @@ export default function App() {
         </div>
       )}
       <nav className="tabs">
-        {(["peers", "queries", "infohashes", "bep44"] as Tab[]).map(t => (
+        {(["peers", "queries", "infohashes", "bep44", "graph"] as Tab[]).map(t => (
           <button
             key={t}
             className={tab === t ? "active" : ""}
@@ -56,6 +57,7 @@ export default function App() {
       {tab === "queries"    && <Queries />}
       {tab === "infohashes" && <Infohashes />}
       {tab === "bep44"      && <Bep44 />}
+      {tab === "graph"      && <Graph />}
     </div>
   );
 }

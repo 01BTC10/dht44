@@ -78,6 +78,19 @@ char *db_select_client_stats_json(int limit);
  * Used by http_ws to aggregate by GeoIP country at read time. */
 int db_foreach_peer_ip(int (*cb)(const char *ip, void *closure), void *closure);
 
+/* Record a directed "A knows about B" edge (B appeared in a nodes list that
+ * A sent back in a find_node response). Safe to call many times; dedupes on
+ * (src, dst) and touches last_seen. */
+void db_upsert_edge(const struct sockaddr_in *src,
+                    const struct sockaddr_in *dst);
+
+/* Return the graph snapshot JSON: top-N peers by degree + the subgraph of
+ * edges between them. Shape:
+ *   { "nodes": [ { "id":"ip:port","ip":"..","port":N,"deg":D,
+ *                  "v_string":"hex|null","country":"XX|null" } ],
+ *     "links": [ { "src":"ip:port","dst":"ip:port" } ] } */
+char *db_select_graph_json(int limit);
+
 /* Count of rows in each table (for heartbeat stats). */
 int64_t db_count_peers(void);
 int64_t db_count_queries(void);

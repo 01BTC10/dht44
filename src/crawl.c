@@ -199,9 +199,11 @@ build_find_node(uint8_t *out, size_t cap,
     return bencode_writer_finish(&w);
 }
 
-/* Ingest a response's compact-nodes blob into the worker's shortlist. */
+/* Ingest a response's compact-nodes blob into the worker's shortlist and
+ * record each (responder → neighbour) edge in the db for graph view. */
 static void
-ingest_compact_nodes(struct worker *w, const uint8_t *b, size_t n)
+ingest_compact_nodes(struct worker *w, const struct sockaddr_in *responder,
+                     const uint8_t *b, size_t n)
 {
     /* Each record is 26 bytes: 20 id + 4 ip + 2 port (both network order). */
     for (size_t i = 0; i + 26 <= n; i += 26) {
@@ -211,6 +213,7 @@ ingest_compact_nodes(struct worker *w, const uint8_t *b, size_t n)
         memcpy(&sa.sin_addr.s_addr, b + i + 20, 4);
         memcpy(&sa.sin_port,        b + i + 24, 2);
         sl_insert(w, &sa, b + i);
+        if (responder) db_upsert_edge(responder, &sa);
     }
 }
 
@@ -264,7 +267,7 @@ on_tx(bep44_tx_event ev,
      * so the next probe advances to a closer node immediately. */
     const bencode_value *nodes = bencode_dict_get(r, "nodes");
     if (nodes && nodes->type == BENCODE_STR) {
-        ingest_compact_nodes(w, nodes->str.bytes, nodes->str.len);
+        ingest_compact_nodes(w, p4, nodes->str.bytes, nodes->str.len);
     }
 }
 
