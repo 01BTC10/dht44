@@ -26,10 +26,8 @@ type RawNode = {
 
 type RawLink = { src: string; dst: string; source?: string; target?: string };
 
-/* Deterministic ISO → hex color "#RRGGBB" for Cosmograph's pointColorByFn.
- * Cosmograph parses hex; rgba() strings are silently dropped, leaving
- * the default white fill. */
-function colorFor(iso?: string | null): string {
+/* Deterministic ISO → HSL → [r,g,b,a] for Cosmograph's pointColor field. */
+function colorFor(iso?: string | null): [number, number, number, number] {
   let h = 210, s = 10, l = 50;
   if (iso && iso.length === 2) {
     let hash = 0;
@@ -49,11 +47,7 @@ function colorFor(iso?: string | null): string {
   else if (h < 240) { g = x; b = c; }
   else if (h < 300) { r = x; b = c; }
   else              { r = c; b = x; }
-  const R = Math.round((r + m) * 255);
-  const G = Math.round((g + m) * 255);
-  const B = Math.round((b + m) * 255);
-  const hx = (n: number) => n.toString(16).padStart(2, "0");
-  return `#${hx(R)}${hx(G)}${hx(B)}`;
+  return [Math.round((r + m) * 255), Math.round((g + m) * 255), Math.round((b + m) * 255), 230];
 }
 
 export default function Graph() {
@@ -81,24 +75,18 @@ export default function Graph() {
         .map((e: RawLink) => ({ source: e.src, target: e.dst }))
         .filter((e: RawLink) => e.source !== e.target);
 
-      /* Inject precomputed color + size into each row. Hex strings, not
-       * rgba() — cosmograph's "direct" strategy parses hex. */
+      /* Inject precomputed color + size into each row so Cosmograph can
+       * map them via pointColorByFn equivalents. Wider size range than
+       * before (was 2..18) so hub peers really stand out. */
       for (const n of points as any[]) {
-        n._color = colorFor(n.country);
+        const c = colorFor(n.country);
+        n._color = `rgba(${c[0]},${c[1]},${c[2]},${(c[3]/255).toFixed(2)})`;
         n._size  = Math.max(4, Math.min(32, 4 + Math.sqrt(n.deg || 1) * 2.2));
       }
 
-      /* Tell prepareCosmographData about _color and _size so they're
-       * preserved in the prepared Arrow table. Without these in the
-       * data config the columns get stripped during preparation, and
-       * the renderer falls back to the default color/size. */
       const result = await prepareCosmographData(
         {
-          points: {
-            pointIdBy:    "id",
-            pointColorBy: "_color",
-            pointSizeBy:  "_size",
-          },
+          points: { pointIdBy: "id" },
           links:  { linkSourceBy: "source", linkTargetsBy: ["target"] },
         },
         points as any,
@@ -111,17 +99,13 @@ export default function Graph() {
           links:  L,
           ...cosmographConfig,
 
-          /* visual style — strategy "direct" passes the column value to
-           * the *ByFn accessor. We pre-baked _color (hex) and _size
-           * (number), so the accessors are identity. Without them the
-           * column is read but discarded → all-white default. */
+          /* visual style — "direct" means the value in the field IS the
+           * final color/size; we pre-baked them above as _color and _size. */
           backgroundColor:        "#0a0c0f",
           pointColorBy:           "_color",
           pointColorStrategy:     "direct",
-          pointColorByFn:         (c: string) => c || "#888",
           pointSizeBy:            "_size",
           pointSizeStrategy:      "direct",
-          pointSizeByFn:          (s: number) => s ?? 6,
           /* Multiplier on top of _size so hub peers are very visible, and
            * grow them with zoom so dense clusters stay readable when you
            * zoom in. */
