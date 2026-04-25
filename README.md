@@ -7,6 +7,29 @@ Built on [`jech/dht`](https://github.com/jech/dht) (Kademlia substrate, vendored
 `vendor/jech-dht/`). Ed25519 via libsodium, SHA-1 via OpenSSL EVP, NAT traversal
 via miniupnpc.
 
+## Branches
+
+This repo has two long-lived branches with deliberately different scope:
+
+- **`main`** (this branch) — the lean BEP 44 implementation. A single C
+  binary that runs as a daemon and a thin CLI to put/get mutable +
+  immutable items. No SQLite, no web server, no observation pipeline.
+  Dependencies stay small: libsodium, OpenSSL, miniupnpc, libjansson.
+  Intended for embedding, scripts, and other tools that just need a
+  reliable BEP 44 client. **Read on for usage.**
+
+- **`crawler`** — active development branch. Adds, on top of the main
+  daemon: an active DHT crawler (find_node + BEP 51 sample_infohashes),
+  a SQLite observation store at `$DHT44_HOME/observe.db`, a
+  libwebsockets HTTP+WS API, a React dashboard with peers / queries /
+  infohashes / bep44 / 3D peer-graph tabs, GeoIP enrichment via MaxMind
+  GeoLite2, a multi-signal crawler / monitor / honeypot classifier on
+  the peers JSON, and a paced liveness sweeper + 7-day pruner that
+  keeps "alive in last 6h / 24h / stale" stats meaningful. Pulls in
+  extra deps (sqlite3, libwebsockets, libmaxminddb) and an `npm`-built
+  frontend. See `README.md` on that branch for the full set of flags
+  and the dashboard runtime invocation.
+
 ## Architecture
 
 Client/daemon split. The daemon owns the UDP socket, routing table, and lookup
