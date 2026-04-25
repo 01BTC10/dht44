@@ -61,18 +61,63 @@ function colorFor(iso?: string | null): string {
  * setConfig pipeline (which can lock up at 10k+ nodes). */
 const FILL: React.CSSProperties = { width: "100%", height: "100%" };
 
+function escHTML(s: string | null | undefined): string {
+  if (s == null) return "";
+  return String(s).replace(/[&<>"']/g, c =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;" } as any)[c]);
+}
+
+/* Render the tooltip body for a peer. Plain HTML so it can be assigned
+ * imperatively to tipRef.current.innerHTML without React. */
+function renderTipHTML(n: RawNode): string {
+  const flag = n.country ? countryFlag(n.country) : "";
+  const cn   = n.country ? countryName(n.country) : "";
+  const cli  = n.v_string ? decodeVString(n.v_string)
+                          : `<span style="color:#556066">unknown client</span>`;
+  let extras = `degree ${n.deg}`;
+  if (n.as_src != null && n.as_dst != null)
+    extras += ` · s:${n.as_src} d:${n.as_dst}`;
+  if ((n.same_ip ?? 0) >= 2)
+    extras += ` · ${n.same_ip} ports/ip`;
+
+  let crawler = "";
+  if (n.likely_crawler) {
+    const why =
+      (n.as_dst === 0 && (n.as_src ?? 0) >= 50 ? " — silent taker" : "") +
+      ((n.same_ip ?? 0) >= 3 ? " — multi-port host" : "");
+    crawler = `<div style="color:#ff9bb5;margin-top:3px">likely crawler${escHTML(why)}</div>`;
+  }
+  let bep51 = "";
+  if (n.supports_bep51 === 1) {
+    bep51 = `<div style="color:#6edd8a;margin-top:3px">✓ BEP 51 (sample_infohashes) capable</div>`;
+  }
+  return (
+    `<div style="color:#8fc0ff">${escHTML(n.ip)}:${n.port}</div>` +
+    `<div>` +
+      (flag ? `<span style="margin-right:6px" title="${escHTML(cn)}">${flag} ${escHTML(n.country!)}</span>` : "") +
+      `<span style="color:#ddd">${cli}</span>` +
+    `</div>` +
+    `<div style="color:#556066;font-size:11px">${extras}</div>` +
+    crawler +
+    bep51 +
+    `<div style="color:#556066;font-size:11px">${escHTML(hex(n.id, 28))}</div>`
+  );
+}
+
 export default function Graph() {
   const cosmoRef     = useRef<CosmographRef>(null);
+  const tipRef       = useRef<HTMLDivElement>(null);
   const [limit, setLimit]       = useState(1000);
   const [loading, setLoading]   = useState(false);
   const [config, setConfig]     = useState<CosmographConfig>({});
   const [counts, setCounts]     = useState<{ nodes: number; links: number } | null>(null);
-  const [hover, setHover]       = useState<RawNode | null>(null);
-  const [hoverPos, setHoverPos] = useState<{ x: number; y: number } | null>(null);
   const [showLegend, setShowLegend] = useState(true);
 
   /* Refs that survive renders without triggering them. The cosmograph
-   * hover callbacks read from these instead of from a stale closure. */
+   * hover callbacks read from these instead of from a stale closure.
+   * The tooltip is updated imperatively via tipRef so hover never
+   * triggers a React render — at 10k+ nodes any re-render of <Graph>
+   * cascades through the cosmograph wrapper and locks the page. */
   const pointsRef     = useRef<RawNode[]>([]);
   const lastHoverIdx  = useRef<number>(-1);
 
@@ -154,24 +199,31 @@ export default function Graph() {
           simulationLinkDistance: 6,
           simulationFriction:     0.86,
 
-          /* hover: signature is (index, pointPosition, event, isSelected).
-           * Cosmograph fires this on every frame the cursor sits over a
-           * point (the point may move under the cursor). Throttle by index
-           * — only update React state when the *which point* changes. */
+          /* Imperative tooltip — no React state churn. Cosmograph fires
+           * onPointMouseOver on every frame the cursor sits over a point
+           * (with a moving simulation, that's *constant*). Updating React
+           * state for that flood locks up the page at 10k+ nodes. */
           onPointMouseOver: (i: number, _pos: [number, number], ev: any) => {
-            if (lastHoverIdx.current === i) return;
-            lastHoverIdx.current = i;
             const n = pointsRef.current[i];
             if (!n) return;
             const me = ev as MouseEvent;
-            setHover(n);
-            setHoverPos({ x: me.clientX, y: me.clientY });
+            const tip = tipRef.current;
+            if (!tip) return;
+            /* Update position every frame (cheap — just two style writes). */
+            tip.style.left = (me.clientX + 12) + "px";
+            tip.style.top  = (me.clientY + 12) + "px";
+            /* Only rebuild contents when the hovered index changes. */
+            if (lastHoverIdx.current === i) return;
+            lastHoverIdx.current = i;
+            tip.style.display = "block";
+            tip.innerHTML = renderTipHTML(n);
           },
-        onPointMouseOut: () => {
-          if (lastHoverIdx.current === -1) return;
-          lastHoverIdx.current = -1;
-          setHover(null);
-        },
+          onPointMouseOut: () => {
+            if (lastHoverIdx.current === -1) return;
+            lastHoverIdx.current = -1;
+            const tip = tipRef.current;
+            if (tip) tip.style.display = "none";
+          },
       });
       setCounts({ nodes: points.length, links: links.length });
     } catch (e) { /* ignore */ }
@@ -216,47 +268,19 @@ export default function Graph() {
           style={FILL}
         />
 
-        {hover && hoverPos && (
-          <div style={{
-            position: "fixed",
-            left: hoverPos.x + 12, top: hoverPos.y + 12,
+        {/* Persistent tooltip — never re-rendered by React. The cosmograph
+         * hover handler writes directly to ref.innerHTML + style.left/top. */}
+        <div
+          ref={tipRef}
+          style={{
+            position: "fixed", display: "none", left: 0, top: 0,
             background: "#14181d", border: "1px solid #2a3642", borderRadius: 3,
-            padding: "6px 10px", pointerEvents: "none", maxWidth: 320, fontSize: 12,
+            padding: "6px 10px", pointerEvents: "none", maxWidth: 320,
+            fontSize: 12, color: "#d8dee6",
             boxShadow: "0 4px 14px rgba(0,0,0,0.5)", zIndex: 10
-          }}>
-            <div style={{ color: "#8fc0ff" }}>{hover.ip}:{hover.port}</div>
-            <div>
-              {hover.country && (
-                <span style={{ marginRight: 6 }} title={countryName(hover.country)}>
-                  {countryFlag(hover.country)} {hover.country}
-                </span>
-              )}
-              <span style={{ color: "#ddd" }}>
-                {hover.v_string ? decodeVString(hover.v_string)
-                                : <span className="dim">unknown client</span>}
-              </span>
-            </div>
-            <div className="small">
-              degree {hover.deg}
-              {hover.as_src != null && hover.as_dst != null &&
-                ` · s:${hover.as_src} d:${hover.as_dst}`}
-              {(hover.same_ip ?? 0) >= 2 && ` · ${hover.same_ip} ports/ip`}
-            </div>
-            {!!hover.likely_crawler && (
-              <div style={{ color: "#ff9bb5", marginTop: 3 }}>
-                likely crawler
-                {hover.as_dst === 0 && (hover.as_src ?? 0) >= 50 ? " — silent taker" : ""}
-                {(hover.same_ip ?? 0) >= 3 ? " — multi-port host" : ""}
-              </div>
-            )}
-            {hover.supports_bep51 === 1 && (
-              <div style={{ color: "#6edd8a", marginTop: 3 }}>
-                ✓ BEP 51 (sample_infohashes) capable
-              </div>
-            )}
-            <div className="small">{hex(hover.id, 28)}</div>
-          </div>
-        )}
+          }}
+        />
+
 
         {/* collapsible legend overlay (kept as-is from canvas version) */}
         <div style={{
