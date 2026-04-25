@@ -178,9 +178,9 @@ export default function Graph() {
           nodeColor={(n: any) => colorFor(n.country)}
           nodeOpacity={0.95}
           nodeResolution={8}        /* sphere segments — lower = faster */
-          linkColor={() => "rgba(160,195,235,0.35)"}
-          linkOpacity={0.4}
-          linkWidth={0.2}
+          linkColor={() => "rgba(160,195,235,0.6)"}
+          linkOpacity={0.55}
+          linkWidth={1.2}
           enableNodeDrag={false}    /* dragging triggers extra simulation */
           showNavInfo={false}
           warmupTicks={50}
