@@ -76,11 +76,12 @@ export default function Graph() {
         .filter((e: RawLink) => e.source !== e.target);
 
       /* Inject precomputed color + size into each row so Cosmograph can
-       * map them via pointColorByFn equivalents. */
+       * map them via pointColorByFn equivalents. Wider size range than
+       * before (was 2..18) so hub peers really stand out. */
       for (const n of points as any[]) {
         const c = colorFor(n.country);
         n._color = `rgba(${c[0]},${c[1]},${c[2]},${(c[3]/255).toFixed(2)})`;
-        n._size  = Math.max(2, Math.min(18, 2 + Math.sqrt(n.deg || 1) * 1.4));
+        n._size  = Math.max(4, Math.min(32, 4 + Math.sqrt(n.deg || 1) * 2.2));
       }
 
       const result = await prepareCosmographData(
@@ -105,6 +106,11 @@ export default function Graph() {
           pointColorStrategy:     "direct",
           pointSizeBy:            "_size",
           pointSizeStrategy:      "direct",
+          /* Multiplier on top of _size so hub peers are very visible, and
+           * grow them with zoom so dense clusters stay readable when you
+           * zoom in. */
+          pointSizeScale:         2.0,
+          scalePointsOnZoom:      true,
           linkColor:              "rgba(160,195,235,0.42)",
           linkWidth:              0.6,
           linkArrows:             false,
