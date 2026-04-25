@@ -115,13 +115,18 @@ export default function Graph() {
           links:  L,
           ...cosmographConfig,
 
-          /* visual style — "direct" means the value in the field IS the
-           * final color/size; we pre-baked them above as _color and _size. */
+          /* visual style. With strategy=direct cosmograph reads the value
+           * from pointColorBy / pointSizeBy and passes it to the *ByFn
+           * accessor (it does NOT use the value as-is). We use the raw
+           * pre-baked _color / _size columns plus identity functions, so
+           * effectively the column value IS the color/size. */
           backgroundColor:        "#0a0c0f",
           pointColorBy:           "_color",
           pointColorStrategy:     "direct",
+          pointColorByFn:         (c: string) => c || "#888",
           pointSizeBy:            "_size",
           pointSizeStrategy:      "direct",
+          pointSizeByFn:          (s: number) => s ?? 6,
           /* Multiplier on top of _size so hub peers are very visible, and
            * grow them with zoom so dense clusters stay readable when you
            * zoom in. */
