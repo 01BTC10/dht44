@@ -345,55 +345,110 @@ qs_find(const char *qs, const char *key, char *buf, size_t cap)
     return NULL;
 }
 
+/* Pending HTTP body that didn't fit in a single lws_write. Per-wsi state
+ * keyed via lws_set_opaque_user_data. The WRITEABLE callback drains it
+ * across multiple iterations of the event loop so big JSON responses
+ * (graph at limit=10000 can be ~1MB) don't get truncated when the kernel
+ * send buffer fills mid-write. */
+struct http_body {
+    unsigned char *buf;     /* LWS_PRE + body */
+    size_t         len;     /* total payload size */
+    size_t         off;     /* bytes already accepted by lws */
+};
+
+static void
+http_body_free(struct http_body *p)
+{
+    if (!p) return;
+    free(p->buf);
+    free(p);
+}
+
+/* Drain as much of `pending` as the socket will currently accept. Called
+ * from the WRITEABLE handler. Returns 1 if the whole body has been sent
+ * (caller should finalize the transaction), 0 if more remains, -1 on error.
+ *
+ * Chunk size matters: passing LWS_WRITE_HTTP_FINAL tells lws "this is the
+ * last byte, you can close the transaction" — so only the LAST chunk uses
+ * FINAL. Intermediate chunks use plain LWS_WRITE_HTTP. We cap each write
+ * at 32 KB so the kernel buffer can drain between chunks instead of one
+ * giant write returning a partial count. */
+#define HTTP_CHUNK 32768
+static int
+http_body_drain(struct lws *wsi, struct http_body *p)
+{
+    while (p->off < p->len) {
+        size_t remaining = p->len - p->off;
+        size_t this_chunk = remaining > HTTP_CHUNK ? HTTP_CHUNK : remaining;
+        enum lws_write_protocol kind =
+            (this_chunk == remaining) ? LWS_WRITE_HTTP_FINAL : LWS_WRITE_HTTP;
+        int rc = lws_write(wsi, p->buf + LWS_PRE + p->off,
+                           this_chunk, kind);
+        if (rc < 0) return -1;
+        if (rc == 0) { lws_callback_on_writable(wsi); return 0; }
+        p->off += rc;
+        if ((size_t)rc < this_chunk) {
+            /* Kernel buffer full; ask to be called back when it drains. */
+            lws_callback_on_writable(wsi);
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/* Build headers + start streaming `body`. Allocates the streaming buffer
+ * and stashes it as the wsi's opaque user data; returns 0 even when the
+ * write isn't fully drained — the WRITEABLE handler finishes it. */
+static int
+send_buffered_response(struct lws *wsi, int status, const char *ctype,
+                       const char *body, size_t len, int with_cors)
+{
+    unsigned char buf[LWS_PRE + 1024];
+    unsigned char *hp = &buf[LWS_PRE];
+    unsigned char *end = &buf[sizeof(buf) - 1];
+
+    if (lws_add_http_common_headers(wsi, (unsigned int)status,
+                                    ctype, len, &hp, end)) return -1;
+    if (with_cors && lws_add_http_header_by_name(wsi,
+            (unsigned char *)"Access-Control-Allow-Origin:",
+            (unsigned char *)"*", 1, &hp, end)) return -1;
+    if (lws_finalize_write_http_header(wsi, &buf[LWS_PRE], &hp, end)) return -1;
+
+    struct http_body *p = calloc(1, sizeof(*p));
+    if (!p) return -1;
+    p->buf = malloc(LWS_PRE + len);
+    if (!p->buf) { free(p); return -1; }
+    memcpy(p->buf + LWS_PRE, body, len);
+    p->len = len;
+    p->off = 0;
+
+    /* Stash on wsi for the WRITEABLE callback. */
+    lws_set_opaque_user_data(wsi, p);
+
+    int rc = http_body_drain(wsi, p);
+    if (rc < 0) { http_body_free(p); lws_set_opaque_user_data(wsi, NULL); return -1; }
+    if (rc == 1) {
+        http_body_free(p);
+        lws_set_opaque_user_data(wsi, NULL);
+        if (lws_http_transaction_completed(wsi)) return -1;
+    }
+    return 0;
+}
+
 static int
 send_json_response(struct lws *wsi, const char *body)
 {
     if (!body) body = "null";
-    size_t len = strlen(body);
-    unsigned char buf[LWS_PRE + 1024];
-    unsigned char *p = &buf[LWS_PRE];
-    unsigned char *end = &buf[sizeof(buf) - 1];
-
-    if (lws_add_http_common_headers(wsi, HTTP_STATUS_OK,
-                                    "application/json", len, &p, end))
-        return -1;
-    if (lws_add_http_header_by_name(wsi,
-            (unsigned char *)"Access-Control-Allow-Origin:",
-            (unsigned char *)"*", 1, &p, end))
-        return -1;
-    if (lws_finalize_write_http_header(wsi, &buf[LWS_PRE], &p, end))
-        return -1;
-
-    /* Send body. Must copy into an LWS_PRE-prefixed buffer. */
-    size_t chunk_cap = LWS_PRE + len + 16;
-    unsigned char *chunk = malloc(chunk_cap);
-    if (!chunk) return -1;
-    memcpy(chunk + LWS_PRE, body, len);
-    int rc = lws_write(wsi, chunk + LWS_PRE, len, LWS_WRITE_HTTP_FINAL);
-    free(chunk);
-    if (rc < (int)len) return -1;
-    if (lws_http_transaction_completed(wsi)) return -1;
-    return 0;
+    return send_buffered_response(wsi, HTTP_STATUS_OK,
+                                  "application/json",
+                                  body, strlen(body), /*cors=*/1);
 }
 
 static int
 send_text_response(struct lws *wsi, int status, const char *ctype, const char *body)
 {
-    size_t len = strlen(body);
-    unsigned char buf[LWS_PRE + 1024];
-    unsigned char *p = &buf[LWS_PRE];
-    unsigned char *end = &buf[sizeof(buf) - 1];
-
-    if (lws_add_http_common_headers(wsi, status, ctype, len, &p, end)) return -1;
-    if (lws_finalize_write_http_header(wsi, &buf[LWS_PRE], &p, end)) return -1;
-    unsigned char *chunk = malloc(LWS_PRE + len + 16);
-    if (!chunk) return -1;
-    memcpy(chunk + LWS_PRE, body, len);
-    int rc = lws_write(wsi, chunk + LWS_PRE, len, LWS_WRITE_HTTP_FINAL);
-    free(chunk);
-    if (rc < (int)len) return -1;
-    if (lws_http_transaction_completed(wsi)) return -1;
-    return 0;
+    return send_buffered_response(wsi, status, ctype,
+                                  body, strlen(body), /*cors=*/0);
 }
 
 /* ============================================================
@@ -616,6 +671,30 @@ http_callback(struct lws *wsi, enum lws_callback_reasons reason,
         if (dispatch_http(wsi) < 0) return -1;
         return 0;
     }
+    if (reason == LWS_CALLBACK_HTTP_WRITEABLE) {
+        struct http_body *p = (struct http_body *)lws_get_opaque_user_data(wsi);
+        if (!p) return 0;     /* nothing to do — must be a static-file write */
+        int rc = http_body_drain(wsi, p);
+        if (rc < 0) {
+            http_body_free(p);
+            lws_set_opaque_user_data(wsi, NULL);
+            return -1;
+        }
+        if (rc == 1) {
+            http_body_free(p);
+            lws_set_opaque_user_data(wsi, NULL);
+            if (lws_http_transaction_completed(wsi)) return -1;
+        }
+        return 0;
+    }
+    if (reason == LWS_CALLBACK_CLOSED_HTTP) {
+        struct http_body *p = (struct http_body *)lws_get_opaque_user_data(wsi);
+        if (p) {
+            http_body_free(p);
+            lws_set_opaque_user_data(wsi, NULL);
+        }
+        /* fall through to dummy for any other cleanup */
+    }
     return lws_callback_http_dummy(wsi, reason, user, in, len);
 }
 
@@ -682,6 +761,9 @@ http_ws_init(uint16_t port, const char *static_dir)
     info.protocols = protocols;
     info.options = LWS_SERVER_OPTION_VALIDATE_UTF8;
     info.iface = "lo";     /* default: localhost only */
+    /* Bigger per-thread service buffer so big HTTP responses don't get
+     * implicitly capped at lws's default ~1MB internal ceiling. */
+    info.pt_serv_buf_size = 4 * 1024 * 1024;
 
     /* Allow binding to any interface by setting iface=NULL via env var, for users
      * who want to expose the dashboard on LAN at their own risk. */
