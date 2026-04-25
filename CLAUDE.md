@@ -28,7 +28,9 @@ libsodium, SHA-1 via OpenSSL EVP, NAT traversal via miniupnpc.
 - `libsqlite3` (crawler observation store at `$DHT44_HOME/observe.db`)
 - `libwebsockets` (combined HTTP + WebSocket server in `--web` mode)
 - `libmaxminddb` (GeoIP lookups against MaxMind GeoLite2 `.mmdb` files)
-- `jech/dht` — vendored at `vendor/jech-dht/` (git submodule)
+- `jech/dht` — inlined at `vendor/jech-dht/` (plain tracked tree, not a
+  submodule). One local additive patch on top of upstream — see
+  `vendor/jech-dht/PROVENANCE.md`.
 
 Install (Arch):
 `sudo pacman -S libsodium openssl miniupnpc jansson sqlite libwebsockets libmaxminddb`.

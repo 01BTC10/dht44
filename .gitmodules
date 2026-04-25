@@ -1,3 +1,0 @@
-[submodule "vendor/jech-dht"]
-	path = vendor/jech-dht
-	url = http://ds1621.tail7aed4e.ts.net:3000/r2d2/dht
