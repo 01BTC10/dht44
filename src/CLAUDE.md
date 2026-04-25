@@ -17,9 +17,13 @@ overall design, BEP 44 protocol notes, and coding conventions.
 | `lookup.{c,h}` | 6 | iterative closest-node lookup (α=3, top-k=8) |
 | `ipc.{c,h}` | 7 | UNIX socket framing for client↔daemon |
 | `upnp.{c,h}` | 8 | miniupnpc IGD port mapping (best-effort, non-fatal) |
-| `cmd_daemon.c` | 9 | daemon event loop, republish timer, inbound serve |
+| `cmd_daemon.c` | 9 | daemon event loop, republish timer, inbound serve, optional crawl + observe + web |
 | `cmd_get.c` | 10 | thin CLI: derive target, ask daemon, verify locally |
 | `cmd_put.c` | 10 | thin CLI: sign locally, hand signed bytes to daemon |
+| `crawl.{c,h}` | 11 | active crawl workers (find_node + BEP 51) with per-worker shortlists |
+| `observe.{c,h}` | 11 | sink that mines every packet into peers/queries/infohashes/bep44 |
+| `db.{c,h}` | 11 | sqlite3 store at `$DHT44_HOME/observe.db`; JSON readouts via jansson |
+| `http_ws.{c,h}` | 11 | libwebsockets HTTP + WS server; serves the React bundle from `--web-static` |
 
 `cmd_*` files exist as stubs from commit 1 so `main.c` links; each is filled in at
 its layer's commit.

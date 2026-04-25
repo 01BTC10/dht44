@@ -24,10 +24,18 @@ libsodium, SHA-1 via OpenSSL EVP, NAT traversal via miniupnpc.
 - `libsodium` (Ed25519, CSPRNG)
 - `libssl` / `libcrypto` (SHA-1 via EVP, HMAC for token issuance)
 - `libminiupnpc` (UPnP IGD port mapping for the daemon)
-- `libjansson` (human-readable JSON for items on disk)
+- `libjansson` (human-readable JSON for items on disk; JSON for the web API)
+- `libsqlite3` (crawler observation store at `$DHT44_HOME/observe.db`)
+- `libwebsockets` (combined HTTP + WebSocket server in `--web` mode)
+- `libmaxminddb` (GeoIP lookups against MaxMind GeoLite2 `.mmdb` files)
 - `jech/dht` — vendored at `vendor/jech-dht/` (git submodule)
 
-Install (Arch): `sudo pacman -S libsodium openssl miniupnpc jansson`.
+Install (Arch):
+`sudo pacman -S libsodium openssl miniupnpc jansson sqlite libwebsockets libmaxminddb`.
+
+The web dashboard is a React/TypeScript app under `frontend/`, built with
+Vite (`cd frontend && npm install && npm run build` → `frontend/dist/`).
+The C daemon serves it as static files when `--web-static DIR` is passed.
 
 ## Architecture: client/daemon split
 
@@ -119,6 +127,10 @@ dht44 get --target HEX              # immutable
 dht44 get -k KEYFILE [--salt S]     # mutable, derives target locally
 dht44 get --pubkey HEX [--salt S]   # mutable, someone else's key
 dht44 daemon [--port PORT] [--republish MINUTES] [--no-upnp] [--upnp-lifetime SECONDS]
+              [--bootstrap HOST:PORT]... [--no-routers] [--no-ipv6]
+              [--crawl] [--crawl-workers N] [--crawl-pps N]
+              [--web PORT] [--web-static DIR]
+              [--geoip-city PATH] [--geoip-asn PATH]
 ```
 
 Exit codes: `0` success, `1` usage, `2` network/timeout, `3` crypto verify failure,
@@ -129,7 +141,9 @@ bencoded bytes from stdin or file. Default: `--string`.
 
 ## State directory
 
-`~/.dht44/` (mode 0700):
+`~/.dht44/` (mode 0700; override with `DHT44_HOME=/path` — used in practice
+to keep the crawler's state separate from the CLI daemon, e.g.
+`~/.dht44_crawler/`):
 - Keyfiles are JSON written by `keygen` (see CLI section). Schema:
   `{ "keys": [ { "sk": "<128 hex>", "pk": "<64 hex>", "targets": { "": "<40 hex>", "<salt>": "<40 hex>", ... } }, ... ] }`.
   `keygen` always prints the same JSON to stdout. `pubkey`/`target`/`put`/`get`
@@ -137,8 +151,8 @@ bencoded bytes from stdin or file. Default: `--string`.
   `keys[0].pk` for derivation-only commands).
 - `node_id.bin` — 20 B DHT node ID. **Persist across runs** — rotating it destroys
   routing table presence.
-- `nodes.bin` — compact node info list (a few hundred entries) for warm start.
-  Saved every 5 min and on SIGINT.
+- `nodes.bin` / `nodes6.bin` — compact node info lists (v4 + v6) for warm
+  start. Saved every 5 min and on SIGINT.
 - `items/<hex-target>.json` — items the daemon stores for republish + inbound
   serve. Human-readable JSON; binary fields are hex-encoded. Mutable items
   carry `mutable:true, pk, seq, salt?, sig, v`; immutable items carry
@@ -147,6 +161,14 @@ bencoded bytes from stdin or file. Default: `--string`.
   can't validate the signature).
 - `sock` — UNIX socket the daemon listens on. Removed on clean shutdown.
 - `lock` — `flock`-based mutex so a daemon and a CLI command don't collide.
+- `observe.db` (+ `-shm`/`-wal`) — SQLite store for the crawler/observer.
+  Created when `--web` or `--crawl` is on. Tables: `peers`, `queries`,
+  `infohashes`, `bep44_items`, plus a directed edge table feeding the graph
+  view.
+- `geoip/{city,asn}-lite.mmdb` — optional MaxMind GeoLite2 dbs. **Not
+  auto-discovered** — paths must be passed via `--geoip-city` / `--geoip-asn`
+  or `/api/country-stats` returns the "no geoip city db loaded" sentinel and
+  the country panel goes blank.
 
 ## Bootstrap routers
 
@@ -183,6 +205,58 @@ Easy to miss, will bite:
 10. **Token scope**: each responding node issues its own token, tied to requester
     IP + target. Use the token from node X when putting to node X.
 
+## Crawler + observer + web
+
+The daemon has a passive observation pipeline and an optional active crawler,
+both wired into the same single-threaded `select` loop. They are off by
+default; the daemon stays a pure BEP 5/44 node unless `--crawl` or `--web`
+is passed.
+
+```
+   ┌─────────── inbound UDP ───────────┐
+   │                                   │
+   ▼                                   ▼
+peek + dispatch          observe_packet (every direction, every packet)
+   │                                   │
+   ▼                                   ▼
+BEP 5 / BEP 44 handlers          db_upsert_peer / db_insert_query
+                                       │
+                                       ▼
+                                   sqlite3 (WAL, ~1 Hz flush)
+                                       │
+                                       ▼
+                                   http_ws_publish ─► WS clients
+```
+
+- `crawl.{c,h}` — N workers, each owning an XOR-sorted shortlist (24 entries)
+  keyed on its current random target. find_node + BEP 51 sample_infohashes,
+  rate-limited globally to `--crawl-pps`. Walk terminates when the top‑K (8)
+  are RESPONDED/FAILED, then reseeds on a fresh target.
+- `observe.{c,h}` — sink fed by `dht_wrap_step` and `dht_wrap_sendto`. Mines
+  packets into peers/queries/infohashes/bep44, records RTT, and emits topical
+  events for the WS layer.
+- `db.{c,h}` — SQLite at `$DHT44_HOME/observe.db`. WAL mode, implicit
+  transaction opened on first write, committed by `db_flush` ~1 Hz from the
+  daemon loop. Read paths (`db_select_*_json`) emit jansson-built JSON for the
+  HTTP API.
+- `http_ws.{c,h}` — libwebsockets context driven by `http_ws_service` from
+  the same loop. Defaults to `iface="lo"`; `DHT44_WEB_BIND_ALL=1` switches
+  to all-interfaces (use this for LAN access — it bypasses the safe default
+  on purpose). Static dir is optional; without it, serves a built-in 4-tab
+  fallback (no graph, no country/client panels). With `--web-static
+  frontend/dist/`, serves the React UI and gets the full feature set. GeoIP
+  is enriched at read time via libmaxminddb.
+- `frontend/` — React + Vite. Pages: `Peers` (with top-clients and
+  top-countries bar panels), `Queries`, `Infohashes`, `Bep44`, `Graph`
+  (3D force-directed via `react-force-graph-3d`).
+
+### Environment variables
+
+- `DHT44_HOME` — state-dir override (default `~/.dht44/`).
+- `DHT44_WEB_BIND_ALL=1` — bind web server to all interfaces.
+- `DHT_DEBUG=1` — verbose jech/dht trace.
+- `DHT44_LOOKUP_DEBUG=1` — verbose iterative-lookup trace.
+
 ## jech/dht integration
 
 - `dht_init(s, s6, node_id, version)` — pass IPv4 socket + `-1` for v6 (v1).
@@ -209,7 +283,7 @@ Easy to miss, will bite:
 CC      ?= cc
 CFLAGS  ?= -O2 -Wall -Wextra -std=c11
 CFLAGS  += -Isrc -Ivendor/jech-dht
-LDFLAGS ?= -lsodium -lcrypto -lminiupnpc
+LDFLAGS ?= -lsodium -lcrypto -lminiupnpc -ljansson -lsqlite3 -lwebsockets -lmaxminddb
 
 SRC := $(wildcard src/*.c) vendor/jech-dht/dht.c
 OBJ := $(SRC:.c=.o)
@@ -224,10 +298,14 @@ test: $(TESTS)
 tests/test_%: tests/test_%.c $(filter-out src/main.o,$(OBJ))
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
 
+INTEGRATION_TESTS := $(wildcard tests/integration/*.sh)
+integration: dht44
+	@for s in $(INTEGRATION_TESTS); do echo "==> $$s"; bash $$s || exit 1; done
+
 clean:
 	rm -f $(OBJ) dht44 $(TESTS)
 
-.PHONY: clean test
+.PHONY: clean test integration
 ```
 
 ## Testing strategy
