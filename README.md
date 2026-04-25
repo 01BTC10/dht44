@@ -157,5 +157,5 @@ bep44_dht/
 
 ## License
 
-Project: see top-level `LICENSE` (TBD).
-`vendor/jech-dht/` retains its upstream MIT license.
+MIT — see [`LICENSE`](LICENSE). Copyright © 2026 Tayaout Labelle-Kuberek
+<tayaoutlk@gmail.com>. `vendor/jech-dht/` retains its upstream MIT license.
