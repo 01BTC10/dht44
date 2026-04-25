@@ -25,7 +25,9 @@ libsodium, SHA-1 via OpenSSL EVP, NAT traversal via miniupnpc.
 - `libssl` / `libcrypto` (SHA-1 via EVP, HMAC for token issuance)
 - `libminiupnpc` (UPnP IGD port mapping for the daemon)
 - `libjansson` (human-readable JSON for items on disk)
-- `jech/dht` — vendored at `vendor/jech-dht/` (git submodule)
+- `jech/dht` — inlined at `vendor/jech-dht/` (plain tracked tree, not a
+  submodule). One local additive patch on top of upstream — see
+  `vendor/jech-dht/PROVENANCE.md`.
 
 Install (Arch): `sudo pacman -S libsodium openssl miniupnpc jansson`.
 

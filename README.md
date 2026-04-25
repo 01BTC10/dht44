@@ -49,15 +49,14 @@ hello
 
 ```sh
 sudo pacman -S libsodium openssl miniupnpc jansson
-git clone --recurse-submodules ssh://git@ds1621.tail7aed4e.ts.net:4022/r2d2/bep44_dht.git
+git clone ssh://git@ds1621.tail7aed4e.ts.net:4022/r2d2/bep44_dht.git
 cd bep44_dht
 make
 ```
 
-If you cloned without `--recurse-submodules`:
-```sh
-git submodule update --init --recursive
-```
+`vendor/jech-dht/` is checked in directly (no submodule); see
+[`vendor/jech-dht/PROVENANCE.md`](vendor/jech-dht/PROVENANCE.md) for the
+upstream pointer and the local additive patch.
 
 ## Commands
 
@@ -98,7 +97,7 @@ bep44_dht/
 ├── Makefile
 ├── src/                ← project code (one CLAUDE.md inside)
 ├── tests/              ← unit + integration tests
-└── vendor/jech-dht/    ← submodule, vendored as-is
+└── vendor/jech-dht/    ← jech/dht inlined, with one local additive patch
 ```
 
 ## License
