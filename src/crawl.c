@@ -64,13 +64,20 @@ static time_t        g_sec_mark      = 0;
 static int           g_enabled       = 0;
 
 /* ------------------------------------------------------------------
- * "Recently asked" penalty: keep a small LRU of (peer, timestamp) so
- * a single hot peer doesn't get re-probed by every worker every walk.
- * A peer within RECENT_COOLDOWN_S is skipped when picking the next
- * candidate, so the crawler fans out more broadly.
+ * Two cooldown tables:
+ *
+ * 1. RECENT (30s) — general "don't hammer the same peer" back-off,
+ *    applied to every probe so one hot peer doesn't monopolise
+ *    workers.
+ * 2. BEP51 (peer-declared interval) — BEP 51 responses carry an
+ *    `interval` field the responder asks us to honour before we
+ *    sample_infohashes them again. Typical value is 6 hours. Separate
+ *    LRU so it doesn't fight the 30s general cooldown.
  * ------------------------------------------------------------------ */
 #define RECENT_CAP           1024         /* must be power of 2 */
 #define RECENT_COOLDOWN_S    30
+#define BEP51_CAP            2048
+#define BEP51_DEFAULT_INTERVAL_S 3600     /* 1h if peer didn't advertise */
 
 struct recent_entry {
     struct sockaddr_storage peer;
@@ -80,6 +87,48 @@ struct recent_entry {
 };
 static struct recent_entry g_recent[RECENT_CAP];
 static int                 g_recent_next = 0;      /* FIFO index */
+
+/* BEP 51 "do not re-sample" table. `expires` is the absolute wall-clock
+ * after which we may ask this peer for samples again. */
+struct bep51_entry {
+    struct sockaddr_storage peer;
+    socklen_t          peerlen;
+    time_t             expires;
+    int                in_use;
+};
+static struct bep51_entry g_bep51[BEP51_CAP];
+static int                g_bep51_next = 0;
+
+static int sa_eq_generic(const struct sockaddr *, const struct sockaddr *);
+
+static int
+bep51_is_cooling(const struct sockaddr *p)
+{
+    time_t now = time(NULL);
+    for (int i = 0; i < BEP51_CAP; i++) {
+        const struct bep51_entry *b = &g_bep51[i];
+        if (!b->in_use) continue;
+        if (b->expires <= now) continue;
+        if (sa_eq_generic((const struct sockaddr *)&b->peer, p)) return 1;
+    }
+    return 0;
+}
+
+static void
+bep51_mark(const struct sockaddr *p, socklen_t peerlen, int interval_s)
+{
+    if (peerlen > (socklen_t)sizeof(struct sockaddr_storage)) return;
+    if (interval_s <= 0) interval_s = BEP51_DEFAULT_INTERVAL_S;
+    /* Sanity cap: clamp to 24h — some peers return absurd values. */
+    if (interval_s > 86400) interval_s = 86400;
+
+    int i = g_bep51_next;
+    memcpy(&g_bep51[i].peer, p, peerlen);
+    g_bep51[i].peerlen = peerlen;
+    g_bep51[i].expires = time(NULL) + interval_s;
+    g_bep51[i].in_use  = 1;
+    g_bep51_next = (i + 1) % BEP51_CAP;
+}
 
 /* Family-aware equality, copy of the one in dht_wrap. */
 static int
@@ -204,10 +253,13 @@ sl_insert(struct worker *w, const struct sockaddr *peer, socklen_t peerlen,
 static int
 pick_next_fresh(struct worker *w)
 {
-    /* First pass: prefer fresh candidates that aren't on cooldown. */
+    /* First pass: prefer fresh candidates that aren't on cooldown. Sample
+     * workers additionally respect the peer-declared BEP 51 interval. */
     for (int i = 0; i < w->sl_count; i++) {
         if (w->sl[i].state != CAND_FRESH) continue;
-        if (recent_is_hot((const struct sockaddr *)&w->sl[i].peer)) continue;
+        const struct sockaddr *p = (const struct sockaddr *)&w->sl[i].peer;
+        if (recent_is_hot(p)) continue;
+        if (w->mode == WMODE_SAMPLE_INFOHASHES && bep51_is_cooling(p)) continue;
         return i;
     }
     /* Fallback: if every fresh candidate is on cooldown, use one anyway so
@@ -432,6 +484,10 @@ on_tx(bep44_tx_event ev,
         for (size_t i = 0; i + 20 <= slen; i += 20) {
             db_upsert_infohash(s + i, "bep51");
         }
+        /* Honour the peer's declared re-sample interval. */
+        const bencode_value *iv = bencode_dict_get(r, "interval");
+        int interval_s = (iv && iv->type == BENCODE_INT) ? (int)iv->i : 0;
+        bep51_mark(peer, (socklen_t)peerlen, interval_s);
     }
 }
 

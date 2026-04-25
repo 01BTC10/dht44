@@ -591,7 +591,9 @@ db_select_graph_json(int limit)
 {
     if (!g_db) return NULL;
     if (limit <= 0) limit = 300;
-    if (limit > 1500) limit = 1500;
+    /* Hard ceiling so a careless `?limit=all` can't drag the server. The
+     * canvas force-sim tops out around 5k nodes anyway. */
+    if (limit > 10000) limit = 10000;
 
     /* Top-N peers by degree: count appearances as src OR dst in edges.
      * Use a CTE to express the union count, then a final LIMIT. */
@@ -872,6 +874,11 @@ db_select_stats_json(void)
     int64_t now = time(NULL);
     json_object_set_new(o, "ts",          json_integer(now));
     json_object_set_new(o, "peers",       json_integer(db_count_peers()));
+    /* v4 vs v6 split: v6 IPs contain a colon, v4 don't. */
+    json_object_set_new(o, "peers_v6",
+        json_integer(scalar_i64("SELECT COUNT(*) FROM peers WHERE ip LIKE '%:%'")));
+    json_object_set_new(o, "peers_v4",
+        json_integer(scalar_i64("SELECT COUNT(*) FROM peers WHERE ip NOT LIKE '%:%'")));
     json_object_set_new(o, "queries",     json_integer(db_count_queries()));
     json_object_set_new(o, "infohashes",  json_integer(db_count_infohashes()));
     json_object_set_new(o, "bep44_items", json_integer(db_count_bep44()));

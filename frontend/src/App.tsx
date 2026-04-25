@@ -7,7 +7,8 @@ import Bep44 from "./pages/Bep44";
 import Graph from "./pages/Graph";
 
 type Stats = {
-  peers: number; queries: number; infohashes: number;
+  peers: number; peers_v4?: number; peers_v6?: number;
+  queries: number; infohashes: number;
   bep44_items: number; queries_per_min: number;
 };
 
@@ -35,7 +36,15 @@ export default function App() {
       </header>
       {stats && (
         <div className="stats">
-          <div><b>peers</b>{stats.peers.toLocaleString()}</div>
+          <div title="unique (ip, port) peers observed">
+            <b>peers</b>{stats.peers.toLocaleString()}
+            {(stats.peers_v4 != null || stats.peers_v6 != null) && (
+              <span className="small" style={{ marginLeft: 6 }}>
+                (v4:{(stats.peers_v4 ?? 0).toLocaleString()}
+                {" "}· v6:{(stats.peers_v6 ?? 0).toLocaleString()})
+              </span>
+            )}
+          </div>
           <div><b>queries</b>{stats.queries.toLocaleString()}</div>
           <div><b>infohashes</b>{stats.infohashes.toLocaleString()}</div>
           <div><b>bep44</b>{stats.bep44_items.toLocaleString()}</div>

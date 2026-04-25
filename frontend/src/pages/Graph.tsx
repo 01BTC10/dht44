@@ -320,6 +320,8 @@ export default function Graph() {
             <option value={300}>300</option>
             <option value={500}>500</option>
             <option value={1000}>1000</option>
+            <option value={2500}>2500</option>
+            <option value={10000}>all (10k cap)</option>
           </select>
         </label>
         <button style={{ marginLeft: 10 }} onClick={load} disabled={loading}>
