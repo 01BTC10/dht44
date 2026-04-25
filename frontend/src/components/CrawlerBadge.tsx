@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { HoverPause } from "./HoverPause";
 
 export type CrawlerClass = "ok" | "crawler" | "monitor" | "honeypot";
@@ -31,19 +32,36 @@ function prettySignal(raw: string): string {
   return raw;
 }
 
+const POP_W = 360;
+const POP_GAP = 6;
+
 export function CrawlerBadge(
   { cls, score, signals, reason }:
   { cls: CrawlerClass; score: number; signals: string[]; reason: string },
 ) {
   const [open, setOpen] = useState(false);
+  const [pos, setPos] = useState<{ top: number; left: number; placement: "below" | "above" } | null>(null);
+  const badgeRef = useRef<HTMLSpanElement | null>(null);
+
+  useLayoutEffect(() => {
+    if (!open || !badgeRef.current) { setPos(null); return; }
+    const r = badgeRef.current.getBoundingClientRect();
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    const left = Math.min(Math.max(8, r.left), vw - POP_W - 8);
+    const spaceBelow = vh - r.bottom;
+    const placement: "below" | "above" = spaceBelow < 200 ? "above" : "below";
+    const top = placement === "below" ? r.bottom + POP_GAP : r.top - POP_GAP;
+    setPos({ top, left, placement });
+  }, [open]);
+
   if (cls === "ok") return null;
   const s = STYLES[cls];
 
   return (
-    <HoverPause
-      style={{ position: "relative", marginLeft: 6, display: "inline-block" }}
-    >
+    <HoverPause style={{ marginLeft: 6, display: "inline-block" }}>
       <span
+        ref={badgeRef}
         onMouseEnter={() => setOpen(true)}
         onMouseLeave={() => setOpen(false)}
         style={{
@@ -58,26 +76,27 @@ export function CrawlerBadge(
       >
         {s.label}
       </span>
-      {open && (
+      {open && pos && createPortal(
         <div
           onMouseEnter={() => setOpen(true)}
           onMouseLeave={() => setOpen(false)}
           style={{
-            position: "absolute",
-            top: "calc(100% + 4px)",
-            left: 0,
-            zIndex: 100,
+            position: "fixed",
+            top: pos.top,
+            left: pos.left,
+            transform: pos.placement === "above" ? "translateY(-100%)" : undefined,
+            zIndex: 9999,
+            width: POP_W,
             background: "#0f1316",
             border: `1px solid ${s.border}`,
             borderRadius: 3,
             padding: "8px 10px",
-            minWidth: 280,
-            maxWidth: 420,
             color: "#d8dee6",
             fontSize: 11,
             lineHeight: 1.5,
-            boxShadow: "0 4px 12px rgba(0,0,0,0.5)",
+            boxShadow: "0 4px 12px rgba(0,0,0,0.6)",
             whiteSpace: "normal",
+            pointerEvents: "auto",
           }}
         >
           <div style={{ color: s.fg, fontWeight: 600, marginBottom: 4 }}>
@@ -85,9 +104,8 @@ export function CrawlerBadge(
           </div>
           {signals.length > 0 ? (
             <ul style={{ margin: 0, padding: 0, listStyle: "none" }}>
-              {signals.map((sig) => {
+              {signals.map((sig, i) => {
                 const parts = reason.split(" · ");
-                const i = signals.indexOf(sig);
                 const text = parts[i] ?? prettySignal(sig);
                 return (
                   <li key={sig} style={{ padding: "2px 0" }}>
@@ -106,7 +124,8 @@ export function CrawlerBadge(
           <div style={{ marginTop: 6, color: "#556066", fontSize: 10 }}>
             feed paused while hovering
           </div>
-        </div>
+        </div>,
+        document.body,
       )}
     </HoverPause>
   );
