@@ -159,16 +159,22 @@ db_open(const char *path)
         "CREATE INDEX IF NOT EXISTS edges_dst ON edges(dst_ip, dst_port);";
     if (exec_noret(SCHEMA) < 0) return -1;
 
-    /* Additive migration: add supports_bep51 column if missing. SQLite
-     * raises "duplicate column name" if already present, which we suppress. */
-    char *merr = NULL;
-    int mrc = sqlite3_exec(g_db,
+    /* Additive migrations: add columns if missing. SQLite raises
+     * "duplicate column name" if already present, which we suppress. */
+    static const char *MIGRATIONS[] = {
         "ALTER TABLE peers ADD COLUMN supports_bep51 INTEGER",
-        NULL, NULL, &merr);
-    if (mrc != SQLITE_OK && mrc != SQLITE_ERROR) {     /* ERROR = dup col */
-        fprintf(stderr, TAG "migration note: %s\n", merr ? merr : "?");
+        "ALTER TABLE peers ADD COLUMN last_pinged   INTEGER",
+        "CREATE INDEX IF NOT EXISTS peers_pinged ON peers(last_pinged)",
+        NULL,
+    };
+    for (int i = 0; MIGRATIONS[i]; i++) {
+        char *merr = NULL;
+        int mrc = sqlite3_exec(g_db, MIGRATIONS[i], NULL, NULL, &merr);
+        if (mrc != SQLITE_OK && mrc != SQLITE_ERROR) {     /* ERROR = dup col */
+            fprintf(stderr, TAG "migration note: %s\n", merr ? merr : "?");
+        }
+        sqlite3_free(merr);
     }
-    sqlite3_free(merr);
 
     if (prepare_all() < 0) return -1;
     fprintf(stderr, TAG "opened %s\n", path);
@@ -582,6 +588,100 @@ int64_t db_count_queries(void)    { return scalar_i64("SELECT COUNT(*) FROM quer
 int64_t db_count_infohashes(void) { return scalar_i64("SELECT COUNT(*) FROM infohashes"); }
 int64_t db_count_bep44(void)      { return scalar_i64("SELECT COUNT(*) FROM bep44_items"); }
 
+int64_t
+db_count_peers_since(int64_t since_ts)
+{
+    if (!g_db) return 0;
+    sqlite3_stmt *s = NULL;
+    if (sqlite3_prepare_v2(g_db,
+            "SELECT COUNT(*) FROM peers WHERE last_seen >= ?",
+            -1, &s, NULL) != SQLITE_OK) return 0;
+    sqlite3_bind_int64(s, 1, since_ts);
+    int64_t n = 0;
+    if (sqlite3_step(s) == SQLITE_ROW) n = sqlite3_column_int64(s, 0);
+    sqlite3_finalize(s);
+    return n;
+}
+
+/* Fill `out` with up to `max` (ip,port) entries whose last_pinged is NULL or
+ * older than `older_than_ts`, oldest first. Returns the number filled. */
+int
+db_select_liveness_candidates(int max, int64_t older_than_ts,
+                              struct sockaddr_storage *out, int *out_lens)
+{
+    if (!g_db || !out || !out_lens || max <= 0) return 0;
+    sqlite3_stmt *s = NULL;
+    if (sqlite3_prepare_v2(g_db,
+            "SELECT ip,port FROM peers"
+            " WHERE last_pinged IS NULL OR last_pinged < ?"
+            " ORDER BY last_pinged IS NULL DESC, last_pinged ASC"
+            " LIMIT ?", -1, &s, NULL) != SQLITE_OK) return 0;
+    sqlite3_bind_int64(s, 1, older_than_ts);
+    sqlite3_bind_int  (s, 2, max);
+    int n = 0;
+    while (sqlite3_step(s) == SQLITE_ROW && n < max) {
+        const char *ip = (const char *)sqlite3_column_text(s, 0);
+        int port = sqlite3_column_int(s, 1);
+        if (!ip) continue;
+        struct sockaddr_in6 sin6 = {0};
+        struct sockaddr_in  sin4 = {0};
+        if (inet_pton(AF_INET, ip, &sin4.sin_addr) == 1) {
+            sin4.sin_family = AF_INET;
+            sin4.sin_port = htons((uint16_t)port);
+            memcpy(&out[n], &sin4, sizeof(sin4));
+            out_lens[n] = sizeof(sin4);
+            n++;
+        } else if (inet_pton(AF_INET6, ip, &sin6.sin6_addr) == 1) {
+            sin6.sin6_family = AF_INET6;
+            sin6.sin6_port = htons((uint16_t)port);
+            memcpy(&out[n], &sin6, sizeof(sin6));
+            out_lens[n] = sizeof(sin6);
+            n++;
+        }
+    }
+    sqlite3_finalize(s);
+    return n;
+}
+
+void
+db_mark_pinged(const struct sockaddr *peer, socklen_t peerlen, int64_t ts)
+{
+    (void)peerlen;
+    if (!g_db || !peer) return;
+    char ip[INET6_ADDRSTRLEN];
+    int  port;
+    if (peer_key(peer, ip, sizeof(ip), &port) < 0) return;
+    tx_begin_if_needed();
+    sqlite3_stmt *s = NULL;
+    if (sqlite3_prepare_v2(g_db,
+            "UPDATE peers SET last_pinged=? WHERE ip=? AND port=?",
+            -1, &s, NULL) != SQLITE_OK) return;
+    sqlite3_bind_int64(s, 1, ts);
+    sqlite3_bind_text (s, 2, ip, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int  (s, 3, port);
+    if (sqlite3_step(s) != SQLITE_DONE) log_err("mark pinged");
+    sqlite3_finalize(s);
+}
+
+/* Permanently delete peers whose last_seen is older than `older_than_ts`.
+ * Edges referencing pruned peers stay in the edges table (cheap; queried
+ * defensively elsewhere). Returns the number deleted. */
+int
+db_prune_peers_older_than(int64_t older_than_ts)
+{
+    if (!g_db) return 0;
+    tx_begin_if_needed();
+    sqlite3_stmt *s = NULL;
+    if (sqlite3_prepare_v2(g_db,
+            "DELETE FROM peers WHERE last_seen < ?", -1, &s, NULL) != SQLITE_OK)
+        return 0;
+    sqlite3_bind_int64(s, 1, older_than_ts);
+    int rc = sqlite3_step(s);
+    int n = (rc == SQLITE_DONE) ? sqlite3_changes(g_db) : 0;
+    sqlite3_finalize(s);
+    return n;
+}
+
 /* Pull the top-N peers by edge degree and the subgraph of edges between them.
  * Response shape: { nodes: [...], links: [...] }. Node metadata (country is
  * NOT included here — GeoIP resolution happens in http_ws.c where the mmdb
@@ -954,6 +1054,15 @@ db_select_stats_json(void)
     json_object_set_new(o, "queries",     json_integer(db_count_queries()));
     json_object_set_new(o, "infohashes",  json_integer(db_count_infohashes()));
     json_object_set_new(o, "bep44_items", json_integer(db_count_bep44()));
+    /* "alive" = last_seen within window. The liveness sweeper keeps these
+     * meaningful by re-pinging every peer at its configured cadence (default
+     * 6h); without --liveness, only peers we happen to talk to count. */
+    int64_t alive_6h  = db_count_peers_since(now - 6  * 3600);
+    int64_t alive_24h = db_count_peers_since(now - 24 * 3600);
+    json_object_set_new(o, "peers_alive_6h",  json_integer(alive_6h));
+    json_object_set_new(o, "peers_alive_24h", json_integer(alive_24h));
+    json_object_set_new(o, "peers_stale",
+        json_integer(db_count_peers() - alive_24h));
     /* rates: rows in last 60s */
     char sql[256];
     snprintf(sql, sizeof(sql),

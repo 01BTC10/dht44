@@ -8,6 +8,7 @@ import Graph from "./pages/Graph";
 
 type Stats = {
   peers: number; peers_v4?: number; peers_v6?: number;
+  peers_alive_6h?: number; peers_alive_24h?: number; peers_stale?: number;
   queries: number; infohashes: number;
   bep44_items: number; queries_per_min: number;
 };
@@ -36,7 +37,7 @@ export default function App() {
       </header>
       {stats && (
         <div className="stats">
-          <div title="unique (ip, port) peers observed">
+          <div title="unique (ip, port) peers observed (cumulative since db opened)">
             <b>peers</b>{stats.peers.toLocaleString()}
             {(stats.peers_v4 != null || stats.peers_v6 != null) && (
               <span className="small" style={{ marginLeft: 6 }}>
@@ -45,6 +46,24 @@ export default function App() {
               </span>
             )}
           </div>
+          {stats.peers_alive_6h != null && (
+            <div title="peers whose last_seen is within the last 6 hours"
+                 style={{ color: "#9be88a" }}>
+              <b>alive 6h</b>{stats.peers_alive_6h.toLocaleString()}
+            </div>
+          )}
+          {stats.peers_alive_24h != null && (
+            <div title="peers whose last_seen is within the last 24 hours"
+                 style={{ color: "#cfd66c" }}>
+              <b>alive 24h</b>{stats.peers_alive_24h.toLocaleString()}
+            </div>
+          )}
+          {stats.peers_stale != null && (
+            <div title="peers not seen in over 24h (sweeper still re-pings until --prune-days)"
+                 style={{ color: "#a0a8b0" }}>
+              <b>stale</b>{stats.peers_stale.toLocaleString()}
+            </div>
+          )}
           <div><b>queries</b>{stats.queries.toLocaleString()}</div>
           <div><b>infohashes</b>{stats.infohashes.toLocaleString()}</div>
           <div><b>bep44</b>{stats.bep44_items.toLocaleString()}</div>

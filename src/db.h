@@ -105,4 +105,17 @@ int64_t db_count_queries(void);
 int64_t db_count_infohashes(void);
 int64_t db_count_bep44(void);
 
+/* Count of peers whose last_seen is at or after `since_ts`. Used by the web
+ * stats endpoint to populate "alive in last N hours" buckets. */
+int64_t db_count_peers_since(int64_t since_ts);
+
+/* Liveness sweeper helpers. */
+int  db_select_liveness_candidates(int max, int64_t older_than_ts,
+                                   struct sockaddr_storage *out, int *out_lens);
+void db_mark_pinged(const struct sockaddr *peer, socklen_t peerlen, int64_t ts);
+
+/* Prune peers whose last_seen is older than `older_than_ts`. Returns the
+ * number of rows removed. */
+int  db_prune_peers_older_than(int64_t older_than_ts);
+
 #endif

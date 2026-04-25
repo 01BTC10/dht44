@@ -34,6 +34,7 @@
 #include "commands.h"
 #include "crawl.h"
 #include "db.h"
+#include "liveness.h"
 #include "dht_wrap.h"
 #include "http_ws.h"
 #include "ipc.h"
@@ -63,6 +64,13 @@ typedef struct {
     int      crawl_workers;
     int      crawl_pps;             /* outbound pkts/sec cap */
 
+    /* liveness sweeper */
+    int      liveness;              /* 0 = off, 1 = on (defaults on with --crawl) */
+    int      liveness_set;          /* user explicitly set --liveness/--no-liveness */
+    int      liveness_window_h;     /* re-ping cadence per peer */
+    int      liveness_pps;          /* upper bound on ping rate */
+    int      prune_days;            /* delete peers with last_seen older than this */
+
     /* web + geoip */
     uint16_t web_port;              /* 0 = web disabled */
     const char *web_static;         /* NULL = built-in UI */
@@ -75,6 +83,9 @@ static const char USAGE_DAEMON[] =
     "                    [--upnp-lifetime SEC] [--bootstrap HOST:PORT]...\n"
     "                    [--no-routers] [--no-ipv6]\n"
     "                    [--crawl] [--crawl-workers N] [--crawl-pps N]\n"
+    "                    [--liveness | --no-liveness]\n"
+    "                    [--liveness-window-hours H] [--liveness-pps N]\n"
+    "                    [--prune-days D]\n"
     "                    [--web PORT] [--web-static DIR]\n"
     "                    [--geoip-city PATH] [--geoip-asn PATH]\n";
 
@@ -87,6 +98,9 @@ parse_args(int argc, char **argv, daemon_args *a)
     a->upnp_lifetime = 3600;
     a->crawl_workers = 8;
     a->crawl_pps = 100;
+    a->liveness_window_h = 6;
+    a->liveness_pps = 50;
+    a->prune_days = 7;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--port") == 0 && i + 1 < argc) {
@@ -113,6 +127,16 @@ parse_args(int argc, char **argv, daemon_args *a)
             a->crawl_workers = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--crawl-pps") == 0 && i + 1 < argc) {
             a->crawl_pps = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--liveness") == 0) {
+            a->liveness = 1; a->liveness_set = 1;
+        } else if (strcmp(argv[i], "--no-liveness") == 0) {
+            a->liveness = 0; a->liveness_set = 1;
+        } else if (strcmp(argv[i], "--liveness-window-hours") == 0 && i + 1 < argc) {
+            a->liveness_window_h = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--liveness-pps") == 0 && i + 1 < argc) {
+            a->liveness_pps = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--prune-days") == 0 && i + 1 < argc) {
+            a->prune_days = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--web") == 0 && i + 1 < argc) {
             a->web_port = (uint16_t)atoi(argv[++i]);
         } else if (strcmp(argv[i], "--web-static") == 0 && i + 1 < argc) {
@@ -1300,6 +1324,16 @@ cmd_daemon(int argc, char **argv)
         crawl_start(g_args.crawl_workers, g_args.crawl_pps);
     }
 
+    /* Liveness sweeper: opt-in via --liveness, but enabled-by-default when
+     * the daemon is observing (has a db) so /api/stats can show the alive
+     * buckets meaningfully. --no-liveness explicitly disables. */
+    int liveness_on = g_args.liveness_set ? g_args.liveness : observe_wanted;
+    if (liveness_on && observe_wanted) {
+        liveness_start(g_args.liveness_window_h,
+                       g_args.liveness_pps,
+                       g_args.prune_days);
+    }
+
     fprintf(stderr, "[dht44:daemon] listening UDP :%u, IPC at $DHT44_HOME/sock\n",
             (unsigned)g_args.port);
 
@@ -1467,6 +1501,7 @@ cmd_daemon(int argc, char **argv)
         /* Crawler advance + db commit + ws heartbeat. crawl_tick is cheap
          * enough to call every loop; db_flush + heartbeat run 1 Hz. */
         crawl_tick();
+        liveness_tick();
         http_ws_service(0);
         if (now >= next_flush) {
             db_flush();
@@ -1476,6 +1511,7 @@ cmd_daemon(int argc, char **argv)
     }
 
     fprintf(stderr, "[dht44:daemon] shutting down\n");
+    liveness_stop();
     crawl_stop();
     periodic_save_nodes();
     if (!g_args.no_upnp) upnp_shutdown();
