@@ -26,8 +26,9 @@ type RawNode = {
 
 type RawLink = { src: string; dst: string; source?: string; target?: string };
 
-/* Deterministic ISO → HSL → [r,g,b,a] for Cosmograph's pointColor field. */
-function colorFor(iso?: string | null): [number, number, number, number] {
+/* Deterministic ISO → hex color string. Cosmograph's "direct" point-color
+ * strategy expects hex strings like "#ff8040", not the rgba(...) form. */
+function colorFor(iso?: string | null): string {
   let h = 210, s = 10, l = 50;
   if (iso && iso.length === 2) {
     let hash = 0;
@@ -47,8 +48,18 @@ function colorFor(iso?: string | null): [number, number, number, number] {
   else if (h < 240) { g = x; b = c; }
   else if (h < 300) { r = x; b = c; }
   else              { r = c; b = x; }
-  return [Math.round((r + m) * 255), Math.round((g + m) * 255), Math.round((b + m) * 255), 230];
+  const R = Math.round((r + m) * 255);
+  const G = Math.round((g + m) * 255);
+  const B = Math.round((b + m) * 255);
+  const hx = (n: number) => n.toString(16).padStart(2, "0");
+  return `#${hx(R)}${hx(G)}${hx(B)}`;
 }
+
+/* Stable container style — defined outside the component so the prop ref
+ * doesn't change between renders. Cosmograph is React.memo'd; if `style`
+ * is an inline literal it sees a new prop every render and re-runs its
+ * setConfig pipeline (which can lock up at 10k+ nodes). */
+const FILL: React.CSSProperties = { width: "100%", height: "100%" };
 
 export default function Graph() {
   const cosmoRef     = useRef<CosmographRef>(null);
@@ -59,6 +70,11 @@ export default function Graph() {
   const [hover, setHover]       = useState<RawNode | null>(null);
   const [hoverPos, setHoverPos] = useState<{ x: number; y: number } | null>(null);
   const [showLegend, setShowLegend] = useState(true);
+
+  /* Refs that survive renders without triggering them. The cosmograph
+   * hover callbacks read from these instead of from a stale closure. */
+  const pointsRef     = useRef<RawNode[]>([]);
+  const lastHoverIdx  = useRef<number>(-1);
 
   const load = async () => {
     setLoading(true);
@@ -79,10 +95,10 @@ export default function Graph() {
        * map them via pointColorByFn equivalents. Wider size range than
        * before (was 2..18) so hub peers really stand out. */
       for (const n of points as any[]) {
-        const c = colorFor(n.country);
-        n._color = `rgba(${c[0]},${c[1]},${c[2]},${(c[3]/255).toFixed(2)})`;
+        n._color = colorFor(n.country);
         n._size  = Math.max(4, Math.min(32, 4 + Math.sqrt(n.deg || 1) * 2.2));
       }
+      pointsRef.current = points;
 
       const result = await prepareCosmographData(
         {
@@ -123,16 +139,24 @@ export default function Graph() {
           simulationLinkDistance: 6,
           simulationFriction:     0.86,
 
-          /* hover: signature is (index, pointPosition, event, isSelected). */
+          /* hover: signature is (index, pointPosition, event, isSelected).
+           * Cosmograph fires this on every frame the cursor sits over a
+           * point (the point may move under the cursor). Throttle by index
+           * — only update React state when the *which point* changes. */
           onPointMouseOver: (i: number, _pos: [number, number], ev: any) => {
-            const n = (points as any)[i];
-            if (n) {
-              setHover(n);
-              const me = ev as MouseEvent;
-              setHoverPos({ x: me.clientX, y: me.clientY });
-            }
+            if (lastHoverIdx.current === i) return;
+            lastHoverIdx.current = i;
+            const n = pointsRef.current[i];
+            if (!n) return;
+            const me = ev as MouseEvent;
+            setHover(n);
+            setHoverPos({ x: me.clientX, y: me.clientY });
           },
-          onPointMouseOut: () => { setHover(null); },
+          onPointMouseOut: () => {
+            if (lastHoverIdx.current === -1) return;
+            lastHoverIdx.current = -1;
+            setHover(null);
+          },
         });
       }
       setCounts({ nodes: points.length, links: links.length });
@@ -175,7 +199,7 @@ export default function Graph() {
         <Cosmograph
           ref={cosmoRef as any}
           {...config}
-          style={{ width: "100%", height: "100%" }}
+          style={FILL}
         />
 
         {hover && hoverPos && (
