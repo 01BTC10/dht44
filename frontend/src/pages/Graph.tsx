@@ -91,12 +91,24 @@ export default function Graph() {
         .map((e: RawLink) => ({ source: e.src, target: e.dst }))
         .filter((e: RawLink) => e.source !== e.target);
 
-      /* Inject precomputed color + size into each row so Cosmograph can
-       * map them via pointColorByFn equivalents. Wider size range than
-       * before (was 2..18) so hub peers really stand out. */
-      for (const n of points as any[]) {
+      /* Inject precomputed color + size + index into each row.
+       * Cosmograph requires pointIndexBy (a 0..N numeric); without
+       * prepareCosmographData we have to assign it ourselves. */
+      const idx = new Map<string, number>();
+      for (let i = 0; i < points.length; i++) {
+        const n = points[i] as any;
+        n._idx = i;
         n._color = colorFor(n.country);
         n._size  = Math.max(4, Math.min(32, 4 + Math.sqrt(n.deg || 1) * 2.2));
+        idx.set(n.id, i);
+      }
+      /* Cosmograph also wants links to reference points by *index*, not
+       * just by string id. Add linkSourceIndexBy / linkTargetIndexBy. */
+      for (const e of links as any[]) {
+        const si = idx.get(e.source);
+        const ti = idx.get(e.target);
+        e._sidx = si ?? -1;
+        e._tidx = ti ?? -1;
       }
       pointsRef.current = points;
 
@@ -106,9 +118,12 @@ export default function Graph() {
       setConfig({
         points: points as any,
         links:  links as any,
-        pointIdBy:        "id",
-        linkSourceBy:     "source",
-        linkTargetBy:     "target",
+        pointIdBy:           "id",
+        pointIndexBy:        "_idx",
+        linkSourceBy:        "source",
+        linkTargetBy:        "target",
+        linkSourceIndexBy:   "_sidx",
+        linkTargetIndexBy:   "_tidx",
 
         /* visual style. With strategy=direct cosmograph reads the value
          * from pointColorBy / pointSizeBy and passes it to the *ByFn
