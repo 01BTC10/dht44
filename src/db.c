@@ -426,8 +426,8 @@ row_peer(sqlite3_stmt *s, void *ctx)
     json_object_set_new(o, "as_src",       json_integer(as_src));
     json_object_set_new(o, "as_dst",       json_integer(as_dst));
     json_object_set_new(o, "same_ip",      json_integer(same_ip));
-    int crawler = (as_dst == 0 && as_src >= 50) || same_ip >= 3;
-    json_object_set_new(o, "likely_crawler", json_integer(crawler ? 1 : 0));
+    /* crawler classification is layered on by http_ws.c's classify_peer
+     * (which has access to ASN org from GeoIP); raw db rows omit it. */
     if (cols > 14 && sqlite3_column_type(s, 14) != SQLITE_NULL) {
         json_object_set_new(o, "supports_bep51",
                             json_integer(sqlite3_column_int(s, 14) ? 1 : 0));

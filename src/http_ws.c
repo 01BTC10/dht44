@@ -217,12 +217,186 @@ country_stats_json(int limit)
     return js;
 }
 
-/* Wrap a JSON array of peer rows with geoip annotations on each. */
+/* ============================================================
+ * Crawler / monitor / honeypot classifier
+ *
+ * Read-time only — no schema change. Each peer row is scored against a small
+ * set of signals (asymmetric edge counts, per-IP port density, BEP 5 read-only
+ * advertisement, BEP 42 mismatch with traffic, missing v_string with traffic,
+ * known anti-piracy ASN, datacenter ASN with port density). The score maps
+ * to a class label: ok / crawler / monitor / honeypot.
+ *
+ * The legacy `likely_crawler: 0|1` field is preserved (= score >= 1) so the
+ * graph view and any external scrapers keep working.
+ * ============================================================ */
+
+static const char *MONITOR_ASN_KEYWORDS[] = {
+    "markmonitor", "ip-echelon", "ip echelon", "irdeto", "nagra",
+    "friend mts", "opsec", "ceg tek", "rightscorp", "excipio", NULL
+};
+
+static const char *DC_ASN_KEYWORDS[] = {
+    "hetzner", "ovh", "digitalocean", "amazon", "google llc", "google cloud",
+    "microsoft", "azure", "linode", "vultr", "contabo", "leaseweb",
+    "datacamp", "choopa", NULL
+};
+
+static int
+contains_ci(const char *hay, const char *needle)
+{
+    if (!hay || !needle) return 0;
+    size_t nl = strlen(needle);
+    if (!nl) return 0;
+    for (const char *p = hay; *p; p++) {
+        if (strncasecmp(p, needle, nl) == 0) return 1;
+    }
+    return 0;
+}
+
+static const char *
+match_keyword(const char *org, const char *const *kws)
+{
+    if (!org) return NULL;
+    for (int i = 0; kws[i]; i++) {
+        if (contains_ci(org, kws[i])) return kws[i];
+    }
+    return NULL;
+}
+
+/* Append "<sep><text>" to dst[0..*used] if it fits. *used is bumped on success. */
+static void
+append_reason(char *dst, size_t cap, size_t *used, const char *text)
+{
+    if (!text || !*text || *used + 1 >= cap) return;
+    int n;
+    if (*used == 0) n = snprintf(dst + *used, cap - *used, "%s", text);
+    else            n = snprintf(dst + *used, cap - *used, " \xc2\xb7 %s", text);
+    if (n > 0) *used += (size_t)n;
+}
+
+/* Mutates row: adds crawler_score / crawler_class / crawler_signals /
+ * crawler_reason / likely_crawler. */
+static void
+classify_peer(json_t *row, json_t *geo)
+{
+    int64_t as_src   = json_integer_value(json_object_get(row, "as_src"));
+    int64_t as_dst   = json_integer_value(json_object_get(row, "as_dst"));
+    int64_t same_ip  = json_integer_value(json_object_get(row, "same_ip"));
+    int64_t qin      = json_integer_value(json_object_get(row, "queries_in"));
+    int64_t qout     = json_integer_value(json_object_get(row, "queries_out"));
+    json_t *ro_v     = json_object_get(row, "ro");
+    json_t *b42_v    = json_object_get(row, "bep42_ok");
+    json_t *v_str    = json_object_get(row, "v_string");
+    const char *org  = geo ? json_string_value(json_object_get(geo, "asn_org")) : NULL;
+
+    int score = 0;
+    json_t *signals = json_array();
+    char reason[1024];
+    size_t rused = 0;
+    reason[0] = 0;
+    char tmp[160];
+
+    if (as_dst == 0 && as_src >= 50) {
+        score += 2;
+        json_array_append_new(signals, json_string("silent_taker"));
+        snprintf(tmp, sizeof(tmp),
+                 "answered %lld queries, never appears in any routing table",
+                 (long long)as_src);
+        append_reason(reason, sizeof(reason), &rused, tmp);
+    }
+
+    if (same_ip >= 50) {
+        score += 3;
+        json_array_append_new(signals, json_string("port_farm_mass"));
+        snprintf(tmp, sizeof(tmp),
+                 "%lld ports on this IP (datacenter farm)",
+                 (long long)same_ip);
+        append_reason(reason, sizeof(reason), &rused, tmp);
+    } else if (same_ip >= 10) {
+        score += 2;
+        json_array_append_new(signals, json_string("port_farm_strong"));
+        snprintf(tmp, sizeof(tmp),
+                 "%lld ports on this IP (likely seedbox / VPN exit)",
+                 (long long)same_ip);
+        append_reason(reason, sizeof(reason), &rused, tmp);
+    } else if (same_ip >= 3) {
+        score += 1;
+        json_array_append_new(signals, json_string("port_farm_mild"));
+        snprintf(tmp, sizeof(tmp),
+                 "%lld distinct ports on this IP (multi-client / NAT)",
+                 (long long)same_ip);
+        append_reason(reason, sizeof(reason), &rused, tmp);
+    }
+
+    if (json_is_integer(ro_v) && json_integer_value(ro_v) == 1) {
+        score += 2;
+        json_array_append_new(signals, json_string("read_only"));
+        append_reason(reason, sizeof(reason), &rused,
+                      "advertises BEP 5 read-only (won't respond)");
+    }
+
+    if (json_is_integer(b42_v) && json_integer_value(b42_v) == 0
+        && (qin + qout) >= 50) {
+        score += 1;
+        json_array_append_new(signals, json_string("bep42_bad"));
+        append_reason(reason, sizeof(reason), &rused,
+                      "ignores BEP 42 with high query volume");
+    }
+
+    if (qin >= 100 && qin >= 5 * (qout > 0 ? qout : 1)) {
+        score += 2;
+        json_array_append_new(signals, json_string("asymmetric_in"));
+        snprintf(tmp, sizeof(tmp),
+                 "talks to us a lot but rarely asks anything (%lld in / %lld out)",
+                 (long long)qin, (long long)qout);
+        append_reason(reason, sizeof(reason), &rused, tmp);
+    }
+
+    if ((!v_str || json_is_null(v_str)) && (qin + qout) >= 20) {
+        score += 1;
+        json_array_append_new(signals, json_string("no_v_string"));
+        append_reason(reason, sizeof(reason), &rused,
+                      "no client identifier, frequent traffic");
+    }
+
+    const char *mon = match_keyword(org, MONITOR_ASN_KEYWORDS);
+    if (mon) {
+        score += 4;
+        snprintf(tmp, sizeof(tmp), "monitor_asn:%s", org ? org : mon);
+        json_array_append_new(signals, json_string(tmp));
+        snprintf(tmp, sizeof(tmp),
+                 "ASN matches known anti-piracy operator: %s", org ? org : mon);
+        append_reason(reason, sizeof(reason), &rused, tmp);
+    } else if (match_keyword(org, DC_ASN_KEYWORDS) && same_ip >= 5) {
+        score += 1;
+        snprintf(tmp, sizeof(tmp), "dc_asn:%s", org);
+        json_array_append_new(signals, json_string(tmp));
+        snprintf(tmp, sizeof(tmp),
+                 "datacenter ASN (%s) with %lld peers on this IP",
+                 org, (long long)same_ip);
+        append_reason(reason, sizeof(reason), &rused, tmp);
+    }
+
+    const char *cls;
+    if      (score >= 5) cls = "honeypot";
+    else if (score >= 3) cls = "monitor";
+    else if (score >= 1) cls = "crawler";
+    else                 cls = "ok";
+
+    json_object_set_new(row, "crawler_score",   json_integer(score));
+    json_object_set_new(row, "crawler_class",   json_string(cls));
+    json_object_set_new(row, "crawler_signals", signals);
+    json_object_set_new(row, "crawler_reason",  json_string(reason));
+    /* Legacy single-bit field — kept for graph view + external scrapers. */
+    json_object_set_new(row, "likely_crawler",  json_integer(score >= 1 ? 1 : 0));
+}
+
+/* Wrap a JSON array of peer rows with geoip annotations + classifier output. */
 static char *
 peers_with_geoip(int limit, const char *order)
 {
     char *plain = db_select_peers_json(limit, order);
-    if (!plain || (!g_city_ok && !g_asn_ok)) return plain;
+    if (!plain) return NULL;
     json_error_t err;
     json_t *arr = json_loads(plain, 0, &err);
     free(plain);
@@ -231,9 +405,9 @@ peers_with_geoip(int limit, const char *order)
     json_t *row;
     json_array_foreach(arr, i, row) {
         const char *ip = json_string_value(json_object_get(row, "ip"));
-        if (!ip) continue;
-        json_t *geo = geoip_lookup(ip);
+        json_t *geo = ip ? geoip_lookup(ip) : NULL;
         if (geo) json_object_set_new(row, "geo", geo);
+        classify_peer(row, geo);
     }
     char *out = json_dumps(arr, JSON_COMPACT);
     json_decref(arr);
