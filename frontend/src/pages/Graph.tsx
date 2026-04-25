@@ -199,23 +199,24 @@ export default function Graph() {
           simulationLinkDistance: 6,
           simulationFriction:     0.86,
 
-          /* Imperative tooltip — no React state churn. Cosmograph fires
-           * onPointMouseOver on every frame the cursor sits over a point
-           * (with a moving simulation, that's *constant*). Updating React
-           * state for that flood locks up the page at 10k+ nodes. */
+          /* Cosmograph fires onPointMouseOver every frame the cursor sits
+           * over a point — and the simulation moves points under the cursor
+           * constantly, so it's a *flood*. Bail on same-index FIRST so 99%
+           * of fires do zero work. The tooltip pins to the position where
+           * the cursor first crossed into the point; it doesn't follow
+           * sub-pixel cursor moves within the same node, but it stays
+           * attached to that node visually. */
           onPointMouseOver: (i: number, _pos: [number, number], ev: any) => {
+            if (lastHoverIdx.current === i) return;
             const n = pointsRef.current[i];
             if (!n) return;
-            const me = ev as MouseEvent;
             const tip = tipRef.current;
             if (!tip) return;
-            /* Update position every frame (cheap — just two style writes). */
-            tip.style.left = (me.clientX + 12) + "px";
-            tip.style.top  = (me.clientY + 12) + "px";
-            /* Only rebuild contents when the hovered index changes. */
-            if (lastHoverIdx.current === i) return;
+            const me = ev as MouseEvent;
             lastHoverIdx.current = i;
             tip.style.display = "block";
+            tip.style.left = (me.clientX + 12) + "px";
+            tip.style.top  = (me.clientY + 12) + "px";
             tip.innerHTML = renderTipHTML(n);
           },
           onPointMouseOut: () => {
@@ -231,6 +232,20 @@ export default function Graph() {
   };
 
   useEffect(() => { load(); /* eslint-disable-next-line */ }, [limit]);
+
+  /* Auto-pause the simulation after a short settle window. Once the
+   * graph stops moving, points sit still under the cursor and
+   * cosmograph's per-frame picking/hover work drops to ~zero. The user
+   * can re-energise by clicking the "play" button (added below) or
+   * dragging the canvas. Without this, hover at 10k nodes continually
+   * runs picking + simulation in parallel and the page jitters. */
+  useEffect(() => {
+    const id = setTimeout(() => {
+      const c = cosmoRef.current as any;
+      if (c && typeof c.pause === "function") c.pause();
+    }, 8000);
+    return () => clearTimeout(id);
+  }, [config]);
 
   return (
     <>
@@ -250,6 +265,13 @@ export default function Graph() {
         </button>
         <button style={{ marginLeft: 6 }} onClick={() => cosmoRef.current?.fitView()}>
           fit
+        </button>
+        <button style={{ marginLeft: 6 }} onClick={() => {
+          const c = cosmoRef.current as any;
+          if (!c) return;
+          if (c.isSimulationRunning) c.pause(); else c.unpause?.() ?? c.start?.();
+        }}>
+          play / pause
         </button>
         <span className="small" style={{ marginLeft: 14 }}>
           {counts
