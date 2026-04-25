@@ -100,33 +100,28 @@ export default function Graph() {
       }
       pointsRef.current = points;
 
-      const result = await prepareCosmographData(
-        {
-          points: { pointIdBy: "id" },
-          links:  { linkSourceBy: "source", linkTargetsBy: ["target"] },
-        },
-        points as any,
-        links as any,
-      );
-      if (result) {
-        const { points: P, links: L, cosmographConfig } = result;
-        setConfig({
-          points: P,
-          links:  L,
-          ...cosmographConfig,
+      /* Skip prepareCosmographData — it strips columns not declared in
+       * the data config (so _color/_size never reach the renderer).
+       * Pass the raw arrays directly with column mapping inline. */
+      setConfig({
+        points: points as any,
+        links:  links as any,
+        pointIdBy:        "id",
+        linkSourceBy:     "source",
+        linkTargetBy:     "target",
 
-          /* visual style. With strategy=direct cosmograph reads the value
-           * from pointColorBy / pointSizeBy and passes it to the *ByFn
-           * accessor (it does NOT use the value as-is). We use the raw
-           * pre-baked _color / _size columns plus identity functions, so
-           * effectively the column value IS the color/size. */
-          backgroundColor:        "#0a0c0f",
-          pointColorBy:           "_color",
-          pointColorStrategy:     "direct",
-          pointColorByFn:         (c: string) => c || "#888",
-          pointSizeBy:            "_size",
-          pointSizeStrategy:      "direct",
-          pointSizeByFn:          (s: number) => s ?? 6,
+        /* visual style. With strategy=direct cosmograph reads the value
+         * from pointColorBy / pointSizeBy and passes it to the *ByFn
+         * accessor (it does NOT use the value as-is). We use the raw
+         * pre-baked _color / _size columns plus identity functions, so
+         * effectively the column value IS the color/size. */
+        backgroundColor:        "#0a0c0f",
+        pointColorBy:           "_color",
+        pointColorStrategy:     "direct",
+        pointColorByFn:         (c: string) => c || "#888",
+        pointSizeBy:            "_size",
+        pointSizeStrategy:      "direct",
+        pointSizeByFn:          (s: number) => s ?? 6,
           /* Multiplier on top of _size so hub peers are very visible, and
            * grow them with zoom so dense clusters stay readable when you
            * zoom in. */
@@ -157,13 +152,12 @@ export default function Graph() {
             setHover(n);
             setHoverPos({ x: me.clientX, y: me.clientY });
           },
-          onPointMouseOut: () => {
-            if (lastHoverIdx.current === -1) return;
-            lastHoverIdx.current = -1;
-            setHover(null);
-          },
-        });
-      }
+        onPointMouseOut: () => {
+          if (lastHoverIdx.current === -1) return;
+          lastHoverIdx.current = -1;
+          setHover(null);
+        },
+      });
       setCounts({ nodes: points.length, links: links.length });
     } catch (e) { /* ignore */ }
     setLoading(false);
