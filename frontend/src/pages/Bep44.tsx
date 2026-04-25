@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { stream, hex, fmtTs } from "../ws";
+import { usePaused } from "../components/HoverPause";
 
 type Row = {
   target: string;
@@ -14,10 +15,13 @@ type Row = {
 
 export default function Bep44() {
   const [rows, setRows] = useState<Row[]>([]);
+  const paused = usePaused();
+  const pausedRef = useRef(paused);
+  pausedRef.current = paused;
   useEffect(() => {
     fetch("/api/bep44?limit=500").then(r => r.json()).then(setRows).catch(() => {});
     return stream.subscribe((topic, data) => {
-      if (topic !== "bep44") return;
+      if (topic !== "bep44" || pausedRef.current) return;
       const d: any = data;
       const r: Row = {
         target: d.target, mutable: d.mutable, pk: d.pk, salt: d.salt,

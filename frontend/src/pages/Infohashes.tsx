@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { stream, hex, fmtTs } from "../ws";
+import { usePaused } from "../components/HoverPause";
 
 type Row = {
   hash: string;
@@ -11,11 +12,14 @@ type Row = {
 export default function Infohashes() {
   const [rows, setRows] = useState<Row[]>([]);
   const [filter, setFilter] = useState("");
+  const paused = usePaused();
+  const pausedRef = useRef(paused);
+  pausedRef.current = paused;
 
   useEffect(() => {
     fetch("/api/infohashes?limit=500").then(r => r.json()).then(setRows).catch(() => {});
     return stream.subscribe((topic, data) => {
-      if (topic !== "infohashes") return;
+      if (topic !== "infohashes" || pausedRef.current) return;
       // incoming event is { ip,port,target,source,ts }; shoehorn into Row shape
       const d: any = data;
       const newRow: Row = {

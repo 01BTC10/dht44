@@ -1,5 +1,7 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { stream, decodeVString, hex, fmtTs, countryFlag, countryName } from "../ws";
+import { usePaused } from "../components/HoverPause";
+import { CrawlerBadge, CrawlerClass } from "../components/CrawlerBadge";
 
 type Geo = { country?: string; city?: string; asn?: number; asn_org?: string };
 type Row = {
@@ -14,6 +16,10 @@ type Row = {
   as_dst?: number;
   same_ip?: number;
   likely_crawler?: number;
+  crawler_class?: CrawlerClass;
+  crawler_score?: number;
+  crawler_signals?: string[];
+  crawler_reason?: string;
   supports_bep51?: number | null;
   geo?: Geo;
 };
@@ -34,9 +40,13 @@ export default function Peers() {
   const [sourcesTotal, setSourcesTotal] = useState<number | null>(null);
   const [countryKnown,   setCountryKnown]   = useState<number | null>(null);
   const [clientKnown,    setClientKnown]    = useState<number | null>(null);
+  const paused = usePaused();
+  const pausedRef = useRef(paused);
+  pausedRef.current = paused;
 
   useEffect(() => {
     const refresh = () => {
+      if (pausedRef.current) return;
       fetch("/api/peers?limit=500").then(r => r.json()).then(setRows).catch(() => {});
       fetch("/api/stats").then(r => r.json()).then(s => setTotal(s.peers)).catch(() => {});
       fetch("/api/client-stats?limit=12").then(r => r.json()).then((s: any) => {
@@ -55,6 +65,7 @@ export default function Peers() {
     refresh();
     const id = setInterval(refresh, 5000);
     const unsub = stream.subscribe((topic, data) => {
+      if (pausedRef.current) return;
       if (topic === "stats" && data?.peers != null) setTotal(data.peers);
     });
     return () => { clearInterval(id); unsub(); };
@@ -207,27 +218,16 @@ export default function Peers() {
             const iso  = r.geo?.country;
             const flag = countryFlag(iso);
             const name = countryName(iso);
-            const crawler = !!r.likely_crawler;
-            const reason = [
-              r.as_dst === 0 && (r.as_src ?? 0) >= 50
-                ? `silent taker: ${r.as_src} queries answered, 0 listings by other peers`
-                : null,
-              (r.same_ip ?? 0) >= 3
-                ? `${r.same_ip} distinct source ports from the same IP`
-                : null,
-            ].filter(Boolean).join(" · ");
+            const cls  = (r.crawler_class ?? (r.likely_crawler ? "crawler" : "ok")) as CrawlerClass;
             return (
               <tr key={r.ip + ":" + r.port}>
                 <td>
                   {r.ip}:{r.port}
-                  {crawler && (
-                    <span title={"likely crawler — " + reason}
-                          style={{ marginLeft: 6, padding: "1px 5px",
-                                   background: "#3a2230", color: "#ff9bb5",
-                                   borderRadius: 2, fontSize: 10,
-                                   border: "1px solid #8a3e54" }}>
-                      crawler?
-                    </span>
+                  {cls !== "ok" && (
+                    <CrawlerBadge cls={cls}
+                                  score={r.crawler_score ?? 0}
+                                  signals={r.crawler_signals ?? []}
+                                  reason={r.crawler_reason ?? ""} />
                   )}
                 </td>
                 <td className="geo" title={name || undefined}>

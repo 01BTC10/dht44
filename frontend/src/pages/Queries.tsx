@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { stream, hex, fmtTs } from "../ws";
+import { usePaused } from "../components/HoverPause";
 
 type Row = {
   ts: number;
@@ -18,8 +19,9 @@ export default function Queries() {
   const [rows, setRows] = useState<Row[]>([]);
   const [filter, setFilter] = useState("");
   const [paused, setPaused] = useState(false);
-  const pausedRef = useRef(paused);
-  pausedRef.current = paused;
+  const hoverPaused = usePaused();
+  const pausedRef = useRef(paused || hoverPaused);
+  pausedRef.current = paused || hoverPaused;
 
   useEffect(() => {
     fetch("/api/queries?limit=200").then(r => r.json()).then(setRows).catch(() => {});
