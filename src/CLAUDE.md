@@ -21,6 +21,7 @@ overall design, BEP 44 protocol notes, and coding conventions.
 | `cmd_get.c` | 10 | thin CLI: derive target, ask daemon, verify locally |
 | `cmd_put.c` | 10 | thin CLI: sign locally, hand signed bytes to daemon |
 | `crawl.{c,h}` | 11 | active crawl workers (find_node + BEP 51) with per-worker shortlists |
+| `liveness.{c,h}` | 11 | paced sweeper that re-pings every observed peer + 7-day pruner |
 | `observe.{c,h}` | 11 | sink that mines every packet into peers/queries/infohashes/bep44 |
 | `db.{c,h}` | 11 | sqlite3 store at `$DHT44_HOME/observe.db`; JSON readouts via jansson |
 | `http_ws.{c,h}` | 11 | libwebsockets HTTP + WS server; serves the React bundle from `--web-static` |

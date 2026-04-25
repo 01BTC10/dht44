@@ -92,6 +92,21 @@ DHT44_HOME=~/.dht44_crawler DHT44_WEB_BIND_ALL=1 \
 Daemon flags:
 - `--crawl` — run active find_node + BEP 51 sample_infohashes workers.
 - `--crawl-workers N` (default 8), `--crawl-pps N` (default 100, outbound cap).
+- `--liveness` / `--no-liveness` — re-ping every observed peer on a
+  rolling cadence so `/api/stats` can report alive vs stale buckets.
+  **Default-on** when observation is enabled (`--web` or `--crawl`); off
+  otherwise. `--no-liveness` opts out explicitly.
+- `--liveness-window-hours H` (default 6) — target re-ping cadence per
+  peer. The sweeper picks the oldest-pinged peer not yet re-checked
+  inside this window. With 28 k peers and a 6 h window the steady-state
+  rate is ~1.3 pings/sec; the cap below bounds the catch-up burst.
+- `--liveness-pps N` (default 50) — outbound cap for the sweeper.
+  Independent of `--crawl-pps`. Bumping the table from 28 k → 200 k
+  peers takes the steady-state rate from ~1.3 to ~10 pps; the cap is
+  there for the catch-up phase right after startup, not the steady state.
+- `--prune-days D` (default 7, 0 = never) — delete peers whose
+  `last_seen` is older than D days. The pruner runs once per hour while
+  the sweeper is on.
 - `--web PORT` — HTTP + WebSocket server. Without `--web-static`, serves a
   minimal built-in HTML stub (4 tabs, no charts). With `--web-static DIR`,
   serves the full React dashboard (peers / queries / infohashes / bep44 / graph,
@@ -115,6 +130,16 @@ API endpoints (when `--web` is on):
 `/api/{stats,peers,queries,infohashes,bep44,client-stats,country-stats,infohash-sources,graph}`
 plus `WS /stream` for live pushes (`peers`, `queries`, `infohashes`, `bep44`,
 `stats`).
+
+`/api/stats` extras worth knowing: `peers` is cumulative (every `(ip,port)`
+ever observed since the db was opened); `peers_alive_6h` and `peers_alive_24h`
+count rows whose `last_seen` is within those windows — meaningful only when
+the liveness sweeper is running. `peers_stale = peers - peers_alive_24h`.
+
+`/api/peers` rows include classifier output (`crawler_score`, `crawler_class`
+∈ {ok, crawler, monitor, honeypot}, `crawler_signals[]`, `crawler_reason`).
+The legacy single bit `likely_crawler` (= score ≥ 1) is also still present
+for the graph view.
 
 ## Layout
 

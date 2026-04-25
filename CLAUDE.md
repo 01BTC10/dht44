@@ -129,6 +129,9 @@ dht44 get --pubkey HEX [--salt S]   # mutable, someone else's key
 dht44 daemon [--port PORT] [--republish MINUTES] [--no-upnp] [--upnp-lifetime SECONDS]
               [--bootstrap HOST:PORT]... [--no-routers] [--no-ipv6]
               [--crawl] [--crawl-workers N] [--crawl-pps N]
+              [--liveness | --no-liveness]
+              [--liveness-window-hours H] [--liveness-pps N]
+              [--prune-days D]
               [--web PORT] [--web-static DIR]
               [--geoip-city PATH] [--geoip-asn PATH]
 ```
@@ -232,6 +235,20 @@ BEP 5 / BEP 44 handlers          db_upsert_peer / db_insert_query
   keyed on its current random target. find_node + BEP 51 sample_infohashes,
   rate-limited globally to `--crawl-pps`. Walk terminates when the top‑K (8)
   are RESPONDED/FAILED, then reseeds on a fresh target.
+- `liveness.{c,h}` — separate sweeper that walks the `peers` table and
+  re-pings every peer on a rolling cadence (default 6 h via
+  `--liveness-window-hours`). Uses jech's `dht_ping_node`; the inbound
+  reply already flows through observe and bumps `last_seen`. The
+  sweeper-internal `last_pinged` column on `peers` (added via additive
+  migration) is the scheduling key — `WHERE last_pinged IS NULL OR
+  last_pinged < ?` ordered ascending picks the next batch. Independently
+  rate-capped by `--liveness-pps` (default 50). Same module also runs
+  the **pruner** once an hour: `DELETE FROM peers WHERE last_seen <
+  now - --prune-days*86400` (default 7 days; 0 disables).
+  Default-on whenever observation is on (`--web` or `--crawl`);
+  `--no-liveness` opts out. The `peers_alive_6h` / `peers_alive_24h` /
+  `peers_stale` fields on `/api/stats` are only meaningful while this
+  is running.
 - `observe.{c,h}` — sink fed by `dht_wrap_step` and `dht_wrap_sendto`. Mines
   packets into peers/queries/infohashes/bep44, records RTT, and emits topical
   events for the WS layer.
