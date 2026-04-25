@@ -37,9 +37,15 @@ struct cand {
     uint8_t state;
 };
 
+enum {
+    WMODE_FIND_NODE        = 0,
+    WMODE_SAMPLE_INFOHASHES = 1,
+};
+
 struct worker {
     int          in_use;
     int          family;              /* AF_INET or AF_INET6 */
+    int          mode;                /* WMODE_* */
     uint8_t      target[BEP44_NODE_ID_LEN];
     struct cand  sl[CRAWL_SHORTLIST];
     int          sl_count;
@@ -276,8 +282,41 @@ build_find_node(uint8_t *out, size_t cap,
       bencode_dict_open(&w);
         bencode_cstr(&w, "id");     bencode_str(&w, our_id, BEP44_NODE_ID_LEN);
         bencode_cstr(&w, "target"); bencode_str(&w, target, BEP44_NODE_ID_LEN);
+        bencode_cstr(&w, "want");
+        bencode_list_open(&w);
+          bencode_cstr(&w, "n4");
+          bencode_cstr(&w, "n6");
+        bencode_list_close(&w);
       bencode_dict_close(&w);
       bencode_cstr(&w, "q"); bencode_cstr(&w, "find_node");
+      bencode_cstr(&w, "t"); bencode_str(&w, tid, 2);
+      bencode_cstr(&w, "y"); bencode_cstr(&w, "q");
+    bencode_dict_close(&w);
+    return bencode_writer_finish(&w);
+}
+
+/* BEP 51 sample_infohashes query. Same shape as find_node but asks the
+ * responder to sample from their stored infohashes at the given target. */
+static ssize_t
+build_sample_infohashes(uint8_t *out, size_t cap,
+                        const uint8_t tid[2],
+                        const uint8_t our_id[BEP44_NODE_ID_LEN],
+                        const uint8_t target[BEP44_NODE_ID_LEN])
+{
+    bencode_writer w;
+    bencode_writer_init(&w, out, cap);
+    bencode_dict_open(&w);
+      bencode_cstr(&w, "a");
+      bencode_dict_open(&w);
+        bencode_cstr(&w, "id");     bencode_str(&w, our_id, BEP44_NODE_ID_LEN);
+        bencode_cstr(&w, "target"); bencode_str(&w, target, BEP44_NODE_ID_LEN);
+        bencode_cstr(&w, "want");
+        bencode_list_open(&w);
+          bencode_cstr(&w, "n4");
+          bencode_cstr(&w, "n6");
+        bencode_list_close(&w);
+      bencode_dict_close(&w);
+      bencode_cstr(&w, "q"); bencode_cstr(&w, "sample_infohashes");
       bencode_cstr(&w, "t"); bencode_str(&w, tid, 2);
       bencode_cstr(&w, "y"); bencode_cstr(&w, "q");
     bencode_dict_close(&w);
@@ -382,6 +421,18 @@ on_tx(bep44_tx_event ev,
         ingest_compact_nodes6(w, peer, (socklen_t)peerlen,
                               nodes6->str.bytes, nodes6->str.len);
     }
+
+    /* BEP 51 sample_infohashes reply: 20-byte hashes concatenated. Presence
+     * of this field (even empty) confirms the peer supports BEP 51. */
+    const bencode_value *samples = bencode_dict_get(r, "samples");
+    if (samples && samples->type == BENCODE_STR) {
+        db_mark_peer_bep51(peer, (socklen_t)peerlen);
+        const uint8_t *s = samples->str.bytes;
+        size_t slen = samples->str.len;
+        for (size_t i = 0; i + 20 <= slen; i += 20) {
+            db_upsert_infohash(s + i, "bep51");
+        }
+    }
 }
 
 /* ============================================================
@@ -412,8 +463,14 @@ worker_send_probe(struct worker *w)
     uint8_t tid[2];
     dht_wrap_random_tid(tid);
     uint8_t pkt[256];
-    ssize_t plen = build_find_node(pkt, sizeof(pkt),
-                                   tid, dht_wrap_node_id(), w->target);
+    ssize_t plen;
+    if (w->mode == WMODE_SAMPLE_INFOHASHES) {
+        plen = build_sample_infohashes(pkt, sizeof(pkt),
+                                       tid, dht_wrap_node_id(), w->target);
+    } else {
+        plen = build_find_node(pkt, sizeof(pkt),
+                               tid, dht_wrap_node_id(), w->target);
+    }
     if (plen < 0) return;
 
     if (dht_wrap_send_query((const struct sockaddr *)&c->peer,
@@ -455,6 +512,10 @@ crawl_start(int workers, int max_pkts_per_sec)
      * family degrade gracefully: worker_reseed returns an empty shortlist
      * when jech's v6 table is empty, and pick_next_fresh returns -1, so
      * the worker just idles until v6 peers show up. */
+    /* Family assignment: 1/4 v6, rest v4 (if v6 socket bound).
+     * Mode assignment: 1/4 BEP 51 sample_infohashes workers, rest find_node.
+     * These axes are independent, so the mix is v4/find_node, v4/sample,
+     * v6/find_node, v6/sample. */
     int v6_enabled = dht_wrap_socket6() >= 0;
     for (int i = 0; i < g_worker_n; i++) {
         g_workers[i].in_use = 1;
@@ -462,14 +523,20 @@ crawl_start(int workers, int max_pkts_per_sec)
         g_workers[i].inflight_idx = -1;
         g_workers[i].family = (v6_enabled && g_worker_n > 1 && (i % 4) == 3)
                               ? AF_INET6 : AF_INET;
+        g_workers[i].mode   = ((i % 4) == 1) ? WMODE_SAMPLE_INFOHASHES
+                                             : WMODE_FIND_NODE;
         rand_target(g_workers[i].target);
     }
-    int v6_n = 0;
-    for (int i = 0; i < g_worker_n; i++)
-        if (g_workers[i].family == AF_INET6) v6_n++;
+    int v6_n = 0, sample_n = 0;
+    for (int i = 0; i < g_worker_n; i++) {
+        if (g_workers[i].family == AF_INET6)           v6_n++;
+        if (g_workers[i].mode   == WMODE_SAMPLE_INFOHASHES) sample_n++;
+    }
     g_enabled = 1;
-    fprintf(stderr, TAG "started %d workers (v4=%d v6=%d), cap %d pkts/s\n",
-            g_worker_n, g_worker_n - v6_n, v6_n, g_pkts_cap);
+    fprintf(stderr,
+        TAG "started %d workers (v4=%d v6=%d, find_node=%d sample=%d), cap %d pkts/s\n",
+        g_worker_n, g_worker_n - v6_n, v6_n,
+        g_worker_n - sample_n, sample_n, g_pkts_cap);
     return 0;
 }
 

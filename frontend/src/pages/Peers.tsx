@@ -14,8 +14,11 @@ type Row = {
   as_dst?: number;
   same_ip?: number;
   likely_crawler?: number;
+  supports_bep51?: number | null;
   geo?: Geo;
 };
+
+type SourceBucket = { source: string; count: number };
 
 type ClientBucket  = { v_string: string | null; count: number };
 type CountryBucket = { iso: string; count: number };
@@ -24,8 +27,11 @@ export default function Peers() {
   const [rows, setRows] = useState<Row[]>([]);
   const [total, setTotal] = useState<number | null>(null);
   const [filter, setFilter] = useState("");
+  const [bep51Only, setBep51Only] = useState(false);
   const [clients,   setClients]   = useState<ClientBucket[] | null>(null);
   const [countries, setCountries] = useState<CountryBucket[] | null>(null);
+  const [sources,   setSources]   = useState<SourceBucket[] | null>(null);
+  const [sourcesTotal, setSourcesTotal] = useState<number | null>(null);
   const [countryKnown,   setCountryKnown]   = useState<number | null>(null);
   const [clientKnown,    setClientKnown]    = useState<number | null>(null);
 
@@ -41,6 +47,10 @@ export default function Peers() {
         setCountries(s.countries ?? []);
         setCountryKnown(s.known ?? null);
       }).catch(() => {});
+      fetch("/api/infohash-sources").then(r => r.json()).then((s: any) => {
+        setSources(s.sources ?? []);
+        setSourcesTotal(s.total ?? null);
+      }).catch(() => {});
     };
     refresh();
     const id = setInterval(refresh, 5000);
@@ -51,7 +61,7 @@ export default function Peers() {
   }, []);
 
   const f = filter.toLowerCase();
-  const filtered = f
+  let filtered = f
     ? rows.filter(r => {
         const s = [
           r.ip, r.geo?.country, r.geo?.city, r.geo?.asn_org,
@@ -61,6 +71,9 @@ export default function Peers() {
         return s.includes(f);
       })
     : rows;
+  if (bep51Only) filtered = filtered.filter(r => r.supports_bep51 === 1);
+
+  const bep51Count = rows.filter(r => r.supports_bep51 === 1).length;
 
   const anyGeo = rows.some(r => r.geo?.country);
 
@@ -69,6 +82,12 @@ export default function Peers() {
       <div className="filter">
         <input placeholder="filter by ip / country / client…"
                value={filter} onChange={e => setFilter(e.target.value)} />
+        <label style={{ marginLeft: 12, fontSize: 11, color: "#a0a8b0" }}>
+          <input type="checkbox" checked={bep51Only}
+                 onChange={e => setBep51Only(e.target.checked)}
+                 style={{ marginRight: 4 }} />
+          BEP 51 only ({bep51Count})
+        </label>
         <span className="small" style={{ marginLeft: 10 }}>
           {filtered.length} shown / <b style={{ color: "#8fc0ff" }}>
             {total != null ? total.toLocaleString() : rows.length}
@@ -136,6 +155,38 @@ export default function Peers() {
           )}
         </section>
       </div>
+
+      {sources && sources.length > 0 && (
+        <div className="panels" style={{ gridTemplateColumns: "1fr" }}>
+          <section className="panel">
+            <h3>infohashes by source <span className="small">
+              {sourcesTotal != null ? `(${sourcesTotal} total)` : ""}
+            </span></h3>
+            <ul className="bars">
+              {sources.map((c) => {
+                const max = sources[0].count;
+                const pct = Math.round((c.count / max) * 100);
+                const label = (
+                  c.source === "bep51"     ? "BEP 51 sample_infohashes" :
+                  c.source === "get_peers" ? "get_peers (asked about)" :
+                  c.source === "announce"  ? "announce_peer" :
+                  c.source === "find_node" ? "find_node target" :
+                  c.source === "bep44"     ? "BEP 44 put" :
+                  c.source === "query"     ? "BEP 44 get"    : c.source
+                );
+                return (
+                  <li key={c.source}>
+                    <span className="bar" style={{ width: pct + "%" }} />
+                    <span className="lbl">{label}</span>
+                    <span className="n">{c.count}</span>
+                  </li>
+                );
+              })}
+            </ul>
+          </section>
+        </div>
+      )}
+
       <table>
         <thead>
           <tr>
@@ -143,6 +194,7 @@ export default function Peers() {
             <th>country</th>
             <th>asn</th>
             <th>client</th>
+            <th title="BEP 51 sample_infohashes capable">BEP 51</th>
             <th>rtt</th>
             <th>in / out</th>
             <th>edges s/d</th>
@@ -187,6 +239,12 @@ export default function Peers() {
                   {r.geo?.asn_org || ""}
                 </td>
                 <td>{decodeVString(r.v_string) || <span className="dim">—</span>}</td>
+                <td className={r.supports_bep51 === 1 ? "ok" : "dim"}
+                    title={r.supports_bep51 === 1
+                      ? "replied to sample_infohashes"
+                      : "not yet confirmed"}>
+                  {r.supports_bep51 === 1 ? "✓" : "?"}
+                </td>
                 <td className={r.rtt_ms == null ? "dim" : ""}>
                   {r.rtt_ms != null ? r.rtt_ms + "ms" : "—"}
                 </td>

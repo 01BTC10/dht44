@@ -611,10 +611,12 @@ dispatch_query(const struct sockaddr *peer, int peerlen,
                const dht_wrap_peek *p,
                const uint8_t *buf, size_t len)
 {
-    int is_put;
-    if (p->q_len == 3 && memcmp(p->q, "get", 3) == 0)        is_put = 0;
-    else if (p->q_len == 3 && memcmp(p->q, "put", 3) == 0)   is_put = 1;
-    else                                                     return;
+    int qkind;
+    if      (p->q_len == 3  && memcmp(p->q, "get", 3) == 0)               qkind = 0; /* BEP 44 get */
+    else if (p->q_len == 3  && memcmp(p->q, "put", 3) == 0)               qkind = 1; /* BEP 44 put */
+    else if (p->q_len == 17 && memcmp(p->q, "sample_infohashes", 17) == 0)
+                                                                          qkind = 2; /* BEP 51 */
+    else                                                                  return;
 
     if (!s_query_cb) return;
 
@@ -623,7 +625,7 @@ dispatch_query(const struct sockaddr *peer, int peerlen,
     if (!root) return;
     const bencode_value *aa = bencode_dict_get(root, "a");
     if (aa && aa->type == BENCODE_DICT) {
-        s_query_cb(peer, peerlen, p->t, p->t_len, is_put, aa, s_query_cb_closure);
+        s_query_cb(peer, peerlen, p->t, p->t_len, qkind, aa, s_query_cb_closure);
     }
     bencode_free(a);
 }
@@ -681,7 +683,8 @@ maybe_handle_bep44(const uint8_t *buf, size_t len,
     if (p.y_len != 1) return 0;
     if (p.y[0] == 'q' && p.q_len > 0) {
         if ((p.q_len == 3 && memcmp(p.q, "get", 3) == 0)
-            || (p.q_len == 3 && memcmp(p.q, "put", 3) == 0)) {
+            || (p.q_len == 3 && memcmp(p.q, "put", 3) == 0)
+            || (p.q_len == 17 && memcmp(p.q, "sample_infohashes", 17) == 0)) {
             dispatch_query(from, fromlen, &p, buf, len);
             return 1;
         }

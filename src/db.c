@@ -158,6 +158,18 @@ db_open(const char *path)
         "CREATE INDEX IF NOT EXISTS edges_src ON edges(src_ip, src_port);"
         "CREATE INDEX IF NOT EXISTS edges_dst ON edges(dst_ip, dst_port);";
     if (exec_noret(SCHEMA) < 0) return -1;
+
+    /* Additive migration: add supports_bep51 column if missing. SQLite
+     * raises "duplicate column name" if already present, which we suppress. */
+    char *merr = NULL;
+    int mrc = sqlite3_exec(g_db,
+        "ALTER TABLE peers ADD COLUMN supports_bep51 INTEGER",
+        NULL, NULL, &merr);
+    if (mrc != SQLITE_OK && mrc != SQLITE_ERROR) {     /* ERROR = dup col */
+        fprintf(stderr, TAG "migration note: %s\n", merr ? merr : "?");
+    }
+    sqlite3_free(merr);
+
     if (prepare_all() < 0) return -1;
     fprintf(stderr, TAG "opened %s\n", path);
     return 0;
@@ -404,8 +416,9 @@ row_peer(sqlite3_stmt *s, void *ctx)
     json_object_set_new(o, "rtt_ms",     sqlite3_column_type(s, 8) == SQLITE_NULL ? json_null() : json_integer(sqlite3_column_int(s, 8)));
     json_object_set_new(o, "queries_in",  json_integer(sqlite3_column_int64(s, 9)));
     json_object_set_new(o, "queries_out", json_integer(sqlite3_column_int64(s, 10)));
-    /* Edge-count extras (columns 11-13) only present when the query JOINed
-     * against edges. Extract defensively so row_peer remains reusable. */
+    /* Edge-count extras (columns 11-13) and optional supports_bep51 (col 14)
+     * only present when the query includes them. Extract defensively so
+     * row_peer remains reusable. */
     int cols = sqlite3_column_count(s);
     int64_t as_src = cols > 11 ? sqlite3_column_int64(s, 11) : 0;
     int64_t as_dst = cols > 12 ? sqlite3_column_int64(s, 12) : 0;
@@ -415,6 +428,12 @@ row_peer(sqlite3_stmt *s, void *ctx)
     json_object_set_new(o, "same_ip",      json_integer(same_ip));
     int crawler = (as_dst == 0 && as_src >= 50) || same_ip >= 3;
     json_object_set_new(o, "likely_crawler", json_integer(crawler ? 1 : 0));
+    if (cols > 14 && sqlite3_column_type(s, 14) != SQLITE_NULL) {
+        json_object_set_new(o, "supports_bep51",
+                            json_integer(sqlite3_column_int(s, 14) ? 1 : 0));
+    } else {
+        json_object_set_new(o, "supports_bep51", json_null());
+    }
     return o;
 }
 
@@ -495,7 +514,8 @@ db_select_peers_json(int limit, const char *order)
         "        p.first_seen, p.last_seen, p.rtt_ms_ewma,"
         "        p.queries_in, p.queries_out,"
         "        COALESCE(s.c,0) AS as_src, COALESCE(d.c,0) AS as_dst,"
-        "        COALESCE(ipc.c,0) AS same_ip"
+        "        COALESCE(ipc.c,0) AS same_ip,"
+        "        p.supports_bep51"
         "   FROM peers p"
         "   LEFT JOIN src  s ON s.ip=p.ip  AND s.port=p.port"
         "   LEFT JOIN dst  d ON d.ip=p.ip  AND d.port=p.port"
@@ -687,6 +707,35 @@ db_select_graph_json(int limit)
 }
 
 char *
+db_select_infohash_sources_json(void)
+{
+    if (!g_db) return NULL;
+    sqlite3_stmt *s = NULL;
+    if (sqlite3_prepare_v2(g_db,
+            "SELECT COALESCE(source,'unknown') src, COUNT(*) c"
+            "  FROM infohashes GROUP BY 1 ORDER BY c DESC",
+            -1, &s, NULL) != SQLITE_OK) return NULL;
+    json_t *arr = json_array();
+    int64_t total = 0;
+    while (sqlite3_step(s) == SQLITE_ROW) {
+        int64_t c = sqlite3_column_int64(s, 1);
+        total += c;
+        json_t *o = json_object();
+        json_object_set_new(o, "source",
+            json_string((const char *)sqlite3_column_text(s, 0)));
+        json_object_set_new(o, "count", json_integer(c));
+        json_array_append_new(arr, o);
+    }
+    sqlite3_finalize(s);
+    json_t *env = json_object();
+    json_object_set_new(env, "total",   json_integer(total));
+    json_object_set_new(env, "sources", arr);
+    char *js = json_dumps(env, JSON_COMPACT);
+    json_decref(env);
+    return js;
+}
+
+char *
 db_select_client_stats_json(int limit)
 {
     if (!g_db) return NULL;
@@ -748,6 +797,53 @@ db_upsert_edge(const struct sockaddr *src, socklen_t srclen,
     sqlite3_bind_int  (s, 4, dport);
     sqlite3_bind_int64(s, 5, (int64_t)time(NULL));
     if (sqlite3_step(s) != SQLITE_DONE) log_err("upsert edge");
+}
+
+/* Mark a peer as BEP 51-capable (sets supports_bep51=1 if null). */
+void
+db_mark_peer_bep51(const struct sockaddr *peer, socklen_t peerlen)
+{
+    (void)peerlen;
+    if (!g_db || !peer) return;
+    char ip[INET6_ADDRSTRLEN];
+    int  port;
+    if (peer_key(peer, ip, sizeof(ip), &port) < 0) return;
+
+    tx_begin_if_needed();
+    sqlite3_stmt *s = NULL;
+    if (sqlite3_prepare_v2(g_db,
+            "UPDATE peers SET supports_bep51 = 1 WHERE ip=? AND port=?",
+            -1, &s, NULL) != SQLITE_OK) { log_err("prep bep51 mark"); return; }
+    sqlite3_bind_text(s, 1, ip, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int (s, 2, port);
+    if (sqlite3_step(s) != SQLITE_DONE) log_err("mark bep51");
+    sqlite3_finalize(s);
+}
+
+/* Return a random sample of up to max_count observed infohashes for the
+ * meta-indexer BEP 51 reply. out must point to max_count * 20 bytes of
+ * buffer. Returns the number of hashes written. */
+int
+db_sample_infohashes(uint8_t *out, int max_count)
+{
+    if (!g_db || !out || max_count <= 0) return 0;
+    char sql[128];
+    snprintf(sql, sizeof(sql),
+        "SELECT hash FROM infohashes ORDER BY RANDOM() LIMIT %d",
+        max_count);
+    sqlite3_stmt *s = NULL;
+    if (sqlite3_prepare_v2(g_db, sql, -1, &s, NULL) != SQLITE_OK) return 0;
+    int n = 0;
+    while (n < max_count && sqlite3_step(s) == SQLITE_ROW) {
+        const void *h = sqlite3_column_blob(s, 0);
+        int hlen = sqlite3_column_bytes(s, 0);
+        if (h && hlen == 20) {
+            memcpy(out + n * 20, h, 20);
+            n++;
+        }
+    }
+    sqlite3_finalize(s);
+    return n;
 }
 
 int

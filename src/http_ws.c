@@ -562,6 +562,12 @@ dispatch_http(struct lws *wsi)
         free(body);
         return rc;
     }
+    if (strcmp(uri, "/api/infohash-sources") == 0) {
+        char *body = db_select_infohash_sources_json();
+        int rc = send_json_response(wsi, body ? body : "{}");
+        free(body);
+        return rc;
+    }
     if (strcmp(uri, "/api/country-stats") == 0) {
         char *body = country_stats_json(limit);
         int rc = send_json_response(wsi, body ? body : "{}");

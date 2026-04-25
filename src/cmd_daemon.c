@@ -796,10 +796,94 @@ dispatch_request(int client_idx, const uint8_t *buf, size_t len)
  * Inbound BEP 44 query handler (peers asking us)
  * ============================================================ */
 
+/* BEP 51 sample_infohashes reply (meta-indexer flavour). We return a random
+ * sample of infohashes we've OBSERVED (peers asked us about them via
+ * get_peers or other sample_infohashes queries) rather than the spec's
+ * "infohashes we announce_peer for" — we're a crawler, not a seed host.
+ * This helps other crawlers bootstrap, at the cost of a little more
+ * visibility as a research node.
+ *
+ * Response fields per BEP 51:
+ *   id, interval, num, samples, nodes [, nodes6]
+ * We always include nodes/nodes6 (this doubles as a find_node reply).
+ */
+#define BEP51_INTERVAL_SEC 3600        /* peers may re-query after 1h */
+#define BEP51_MAX_SAMPLES  50
+
+static void
+reply_sample_infohashes(const struct sockaddr *peer, int peerlen,
+                        const uint8_t *tid, size_t tid_len,
+                        const bencode_value *a)
+{
+    const bencode_value *t = bencode_dict_get(a, "target");
+    if (!t || t->type != BENCODE_STR || t->str.len != BEP44_TARGET_LEN) return;
+    uint8_t target[BEP44_TARGET_LEN];
+    memcpy(target, t->str.bytes, BEP44_TARGET_LEN);
+
+    /* Sample infohashes. If the infohashes table is empty we return an
+     * empty samples blob + num=0 — still a valid reply. */
+    uint8_t samples[BEP51_MAX_SAMPLES * BEP44_TARGET_LEN];
+    int nsamples = observe_enabled()
+                 ? db_sample_infohashes(samples, BEP51_MAX_SAMPLES) : 0;
+    int64_t total = observe_enabled() ? db_count_infohashes() : 0;
+
+    /* Closest nodes to the query's target — reuse our routing table. */
+    struct sockaddr_in  n4[8];
+    struct sockaddr_in6 n6[8];
+    uint8_t n4_ids[8][BEP44_NODE_ID_LEN];
+    uint8_t n6_ids[8][BEP44_NODE_ID_LEN];
+    int nn4 = dht_wrap_closest_to(target, n4, n4_ids, 8);
+    int nn6 = dht_wrap_closest6_to(target, n6, n6_ids, 8);
+
+    uint8_t nodes_buf [8 * 26];
+    uint8_t nodes6_buf[8 * 38];
+    for (int i = 0; i < nn4; i++) {
+        memcpy(nodes_buf + i*26,      n4_ids[i],       20);
+        memcpy(nodes_buf + i*26 + 20, &n4[i].sin_addr,  4);
+        memcpy(nodes_buf + i*26 + 24, &n4[i].sin_port,  2);
+    }
+    for (int i = 0; i < nn6; i++) {
+        memcpy(nodes6_buf + i*38,      n6_ids[i],       20);
+        memcpy(nodes6_buf + i*38 + 20, &n6[i].sin6_addr,16);
+        memcpy(nodes6_buf + i*38 + 36, &n6[i].sin6_port, 2);
+    }
+
+    /* Build the KRPC reply. Outer keys: r, t, y. `r` sub-dict keys in
+     * strict alphabetical order: id, interval, nodes, nodes6, num, samples. */
+    uint8_t out[4096];
+    bencode_writer w;
+    bencode_writer_init(&w, out, sizeof(out));
+    bencode_dict_open(&w);
+      bencode_cstr(&w, "r");
+      bencode_dict_open(&w);
+        bencode_cstr(&w, "id");       bencode_str(&w, dht_wrap_node_id(), BEP44_NODE_ID_LEN);
+        bencode_cstr(&w, "interval"); bencode_int(&w, BEP51_INTERVAL_SEC);
+        if (nn4 > 0) {
+            bencode_cstr(&w, "nodes");
+            bencode_str(&w, nodes_buf, (size_t)(nn4 * 26));
+        }
+        if (nn6 > 0) {
+            bencode_cstr(&w, "nodes6");
+            bencode_str(&w, nodes6_buf, (size_t)(nn6 * 38));
+        }
+        bencode_cstr(&w, "num");      bencode_int(&w, total);
+        bencode_cstr(&w, "samples");
+        bencode_str(&w, samples, (size_t)(nsamples * 20));
+      bencode_dict_close(&w);
+      bencode_cstr(&w, "t");          bencode_str(&w, tid, tid_len);
+      bencode_cstr(&w, "y");          bencode_cstr(&w, "r");
+    bencode_dict_close(&w);
+    ssize_t n = bencode_writer_finish(&w);
+    if (n > 0) {
+        dht_wrap_sendto(peer, peerlen, out, (size_t)n);
+        g_pkts_out++;
+    }
+}
+
 static void
 on_inbound_query(const struct sockaddr *peer, int peerlen,
                  const uint8_t *tid, size_t tid_len,
-                 int is_put,
+                 int qkind,
                  const bencode_value *a,
                  void *closure)
 {
@@ -807,7 +891,13 @@ on_inbound_query(const struct sockaddr *peer, int peerlen,
     const struct sockaddr_in *p4 = (const struct sockaddr_in *)peer;
 
     if (observe_enabled())
-        observe_query_fields(peer, (socklen_t)peerlen, is_put, a);
+        observe_query_fields(peer, (socklen_t)peerlen, qkind == 1, a);
+
+    if (qkind == 2) {                 /* BEP 51 sample_infohashes */
+        reply_sample_infohashes(peer, peerlen, tid, tid_len, a);
+        return;
+    }
+    int is_put = (qkind == 1);
 
     if (!is_put) {
         /* GET — look up target in our items dir */

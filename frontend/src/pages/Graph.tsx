@@ -18,6 +18,7 @@ type Node = {
   as_dst?: number;
   same_ip?: number;
   likely_crawler?: number;
+  supports_bep51?: number | null;
 
   /* sim state */
   x: number; y: number; vx: number; vy: number; r: number;
@@ -63,6 +64,7 @@ export default function Graph() {
         v_string: n.v_string, country: n.country,
         as_src: n.as_src, as_dst: n.as_dst, same_ip: n.same_ip,
         likely_crawler: n.likely_crawler,
+        supports_bep51: n.supports_bep51,
         x: Math.cos((i / N) * Math.PI * 2) * R * (0.6 + 0.4 * Math.random()),
         y: Math.sin((i / N) * Math.PI * 2) * R * (0.6 + 0.4 * Math.random()),
         vx: 0, vy: 0,
@@ -377,6 +379,11 @@ export default function Graph() {
                   ? " — silent taker" : ""}
                 {(hover.same_ip ?? 0) >= 3
                   ? " — multi-port host" : ""}
+              </div>
+            )}
+            {hover.supports_bep51 === 1 && (
+              <div style={{ color: "#6edd8a", marginTop: 3 }}>
+                ✓ BEP 51 (sample_infohashes) capable
               </div>
             )}
             <div className="small">{hex(hover.id, 28)}</div>

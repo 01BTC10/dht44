@@ -169,9 +169,14 @@ int dht_wrap_sendto(const struct sockaddr *peer, int peerlen,
  * Inbound BEP 44 (queries) — handler installed by the daemon
  * ================================================================ */
 
+/* qkind encodes which intercepted query arrived:
+ *   0 = BEP 44 get
+ *   1 = BEP 44 put
+ *   2 = BEP 51 sample_infohashes
+ * Originally the parameter was a binary `is_put`; it's widened in place. */
 typedef void (*bep44_query_cb)(const struct sockaddr *peer, int peerlen,
                                const uint8_t *tid, size_t tid_len,
-                               int is_put,
+                               int qkind,
                                const bencode_value *a,
                                void *closure);
 

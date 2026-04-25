@@ -79,6 +79,13 @@ char *db_select_client_stats_json(int limit);
  * Used by http_ws to aggregate by GeoIP country at read time. */
 int db_foreach_peer_ip(int (*cb)(const char *ip, void *closure), void *closure);
 
+/* BEP 51 helpers. */
+void db_mark_peer_bep51(const struct sockaddr *peer, socklen_t peerlen);
+int  db_sample_infohashes(uint8_t *out, int max_count);
+
+/* Aggregate infohashes by source. Returns JSON array. */
+char *db_select_infohash_sources_json(void);
+
 /* Record a directed "A knows about B" edge (B appeared in a nodes list that
  * A sent back in a find_node response). Safe to call many times; dedupes on
  * (src, dst) and touches last_seen. Accepts mixed families. */
