@@ -26,9 +26,8 @@ type RawNode = {
 
 type RawLink = { src: string; dst: string; source?: string; target?: string };
 
-/* Deterministic ISO → hex color string. Cosmograph's "direct" point-color
- * strategy expects hex strings like "#ff8040", not the rgba(...) form. */
-function colorFor(iso?: string | null): string {
+/* Deterministic ISO → HSL → [r,g,b,a] for Cosmograph's pointColor field. */
+function colorFor(iso?: string | null): [number, number, number, number] {
   let h = 210, s = 10, l = 50;
   if (iso && iso.length === 2) {
     let hash = 0;
@@ -48,78 +47,18 @@ function colorFor(iso?: string | null): string {
   else if (h < 240) { g = x; b = c; }
   else if (h < 300) { r = x; b = c; }
   else              { r = c; b = x; }
-  const R = Math.round((r + m) * 255);
-  const G = Math.round((g + m) * 255);
-  const B = Math.round((b + m) * 255);
-  const hx = (n: number) => n.toString(16).padStart(2, "0");
-  return `#${hx(R)}${hx(G)}${hx(B)}`;
-}
-
-/* Stable container style — defined outside the component so the prop ref
- * doesn't change between renders. Cosmograph is React.memo'd; if `style`
- * is an inline literal it sees a new prop every render and re-runs its
- * setConfig pipeline (which can lock up at 10k+ nodes). */
-const FILL: React.CSSProperties = { width: "100%", height: "100%" };
-
-function escHTML(s: string | null | undefined): string {
-  if (s == null) return "";
-  return String(s).replace(/[&<>"']/g, c =>
-    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;" } as any)[c]);
-}
-
-/* Render the tooltip body for a peer. Plain HTML so it can be assigned
- * imperatively to tipRef.current.innerHTML without React. */
-function renderTipHTML(n: RawNode): string {
-  const flag = n.country ? countryFlag(n.country) : "";
-  const cn   = n.country ? countryName(n.country) : "";
-  const cli  = n.v_string ? decodeVString(n.v_string)
-                          : `<span style="color:#556066">unknown client</span>`;
-  let extras = `degree ${n.deg}`;
-  if (n.as_src != null && n.as_dst != null)
-    extras += ` · s:${n.as_src} d:${n.as_dst}`;
-  if ((n.same_ip ?? 0) >= 2)
-    extras += ` · ${n.same_ip} ports/ip`;
-
-  let crawler = "";
-  if (n.likely_crawler) {
-    const why =
-      (n.as_dst === 0 && (n.as_src ?? 0) >= 50 ? " — silent taker" : "") +
-      ((n.same_ip ?? 0) >= 3 ? " — multi-port host" : "");
-    crawler = `<div style="color:#ff9bb5;margin-top:3px">likely crawler${escHTML(why)}</div>`;
-  }
-  let bep51 = "";
-  if (n.supports_bep51 === 1) {
-    bep51 = `<div style="color:#6edd8a;margin-top:3px">✓ BEP 51 (sample_infohashes) capable</div>`;
-  }
-  return (
-    `<div style="color:#8fc0ff">${escHTML(n.ip)}:${n.port}</div>` +
-    `<div>` +
-      (flag ? `<span style="margin-right:6px" title="${escHTML(cn)}">${flag} ${escHTML(n.country!)}</span>` : "") +
-      `<span style="color:#ddd">${cli}</span>` +
-    `</div>` +
-    `<div style="color:#556066;font-size:11px">${extras}</div>` +
-    crawler +
-    bep51 +
-    `<div style="color:#556066;font-size:11px">${escHTML(hex(n.id, 28))}</div>`
-  );
+  return [Math.round((r + m) * 255), Math.round((g + m) * 255), Math.round((b + m) * 255), 230];
 }
 
 export default function Graph() {
   const cosmoRef     = useRef<CosmographRef>(null);
-  const tipRef       = useRef<HTMLDivElement>(null);
   const [limit, setLimit]       = useState(1000);
   const [loading, setLoading]   = useState(false);
   const [config, setConfig]     = useState<CosmographConfig>({});
   const [counts, setCounts]     = useState<{ nodes: number; links: number } | null>(null);
+  const [hover, setHover]       = useState<RawNode | null>(null);
+  const [hoverPos, setHoverPos] = useState<{ x: number; y: number } | null>(null);
   const [showLegend, setShowLegend] = useState(true);
-
-  /* Refs that survive renders without triggering them. The cosmograph
-   * hover callbacks read from these instead of from a stale closure.
-   * The tooltip is updated imperatively via tipRef so hover never
-   * triggers a React render — at 10k+ nodes any re-render of <Graph>
-   * cascades through the cosmograph wrapper and locks the page. */
-  const pointsRef     = useRef<RawNode[]>([]);
-  const lastHoverIdx  = useRef<number>(-1);
 
   const load = async () => {
     setLoading(true);
@@ -136,52 +75,37 @@ export default function Graph() {
         .map((e: RawLink) => ({ source: e.src, target: e.dst }))
         .filter((e: RawLink) => e.source !== e.target);
 
-      /* Inject precomputed color + size + index into each row.
-       * Cosmograph requires pointIndexBy (a 0..N numeric); without
-       * prepareCosmographData we have to assign it ourselves. */
-      const idx = new Map<string, number>();
-      for (let i = 0; i < points.length; i++) {
-        const n = points[i] as any;
-        n._idx = i;
-        n._color = colorFor(n.country);
+      /* Inject precomputed color + size into each row so Cosmograph can
+       * map them via pointColorByFn equivalents. Wider size range than
+       * before (was 2..18) so hub peers really stand out. */
+      for (const n of points as any[]) {
+        const c = colorFor(n.country);
+        n._color = `rgba(${c[0]},${c[1]},${c[2]},${(c[3]/255).toFixed(2)})`;
         n._size  = Math.max(4, Math.min(32, 4 + Math.sqrt(n.deg || 1) * 2.2));
-        idx.set(n.id, i);
       }
-      /* Cosmograph also wants links to reference points by *index*, not
-       * just by string id. Add linkSourceIndexBy / linkTargetIndexBy. */
-      for (const e of links as any[]) {
-        const si = idx.get(e.source);
-        const ti = idx.get(e.target);
-        e._sidx = si ?? -1;
-        e._tidx = ti ?? -1;
-      }
-      pointsRef.current = points;
 
-      /* Skip prepareCosmographData — it strips columns not declared in
-       * the data config (so _color/_size never reach the renderer).
-       * Pass the raw arrays directly with column mapping inline. */
-      setConfig({
-        points: points as any,
-        links:  links as any,
-        pointIdBy:           "id",
-        pointIndexBy:        "_idx",
-        linkSourceBy:        "source",
-        linkTargetBy:        "target",
-        linkSourceIndexBy:   "_sidx",
-        linkTargetIndexBy:   "_tidx",
+      const result = await prepareCosmographData(
+        {
+          points: { pointIdBy: "id" },
+          links:  { linkSourceBy: "source", linkTargetsBy: ["target"] },
+        },
+        points as any,
+        links as any,
+      );
+      if (result) {
+        const { points: P, links: L, cosmographConfig } = result;
+        setConfig({
+          points: P,
+          links:  L,
+          ...cosmographConfig,
 
-        /* visual style. With strategy=direct cosmograph reads the value
-         * from pointColorBy / pointSizeBy and passes it to the *ByFn
-         * accessor (it does NOT use the value as-is). We use the raw
-         * pre-baked _color / _size columns plus identity functions, so
-         * effectively the column value IS the color/size. */
-        backgroundColor:        "#0a0c0f",
-        pointColorBy:           "_color",
-        pointColorStrategy:     "direct",
-        pointColorByFn:         (c: string) => c || "#888",
-        pointSizeBy:            "_size",
-        pointSizeStrategy:      "direct",
-        pointSizeByFn:          (s: number) => s ?? 6,
+          /* visual style — "direct" means the value in the field IS the
+           * final color/size; we pre-baked them above as _color and _size. */
+          backgroundColor:        "#0a0c0f",
+          pointColorBy:           "_color",
+          pointColorStrategy:     "direct",
+          pointSizeBy:            "_size",
+          pointSizeStrategy:      "direct",
           /* Multiplier on top of _size so hub peers are very visible, and
            * grow them with zoom so dense clusters stay readable when you
            * zoom in. */
@@ -199,53 +123,24 @@ export default function Graph() {
           simulationLinkDistance: 6,
           simulationFriction:     0.86,
 
-          /* Cosmograph fires onPointMouseOver every frame the cursor sits
-           * over a point — and the simulation moves points under the cursor
-           * constantly, so it's a *flood*. Bail on same-index FIRST so 99%
-           * of fires do zero work. The tooltip pins to the position where
-           * the cursor first crossed into the point; it doesn't follow
-           * sub-pixel cursor moves within the same node, but it stays
-           * attached to that node visually. */
+          /* hover: signature is (index, pointPosition, event, isSelected). */
           onPointMouseOver: (i: number, _pos: [number, number], ev: any) => {
-            if (lastHoverIdx.current === i) return;
-            const n = pointsRef.current[i];
-            if (!n) return;
-            const tip = tipRef.current;
-            if (!tip) return;
-            const me = ev as MouseEvent;
-            lastHoverIdx.current = i;
-            tip.style.display = "block";
-            tip.style.left = (me.clientX + 12) + "px";
-            tip.style.top  = (me.clientY + 12) + "px";
-            tip.innerHTML = renderTipHTML(n);
+            const n = (points as any)[i];
+            if (n) {
+              setHover(n);
+              const me = ev as MouseEvent;
+              setHoverPos({ x: me.clientX, y: me.clientY });
+            }
           },
-          onPointMouseOut: () => {
-            if (lastHoverIdx.current === -1) return;
-            lastHoverIdx.current = -1;
-            const tip = tipRef.current;
-            if (tip) tip.style.display = "none";
-          },
-      });
+          onPointMouseOut: () => { setHover(null); },
+        });
+      }
       setCounts({ nodes: points.length, links: links.length });
     } catch (e) { /* ignore */ }
     setLoading(false);
   };
 
   useEffect(() => { load(); /* eslint-disable-next-line */ }, [limit]);
-
-  /* Auto-pause the simulation after a short settle window. Once the
-   * graph stops moving, points sit still under the cursor and
-   * cosmograph's per-frame picking/hover work drops to ~zero. The user
-   * can re-energise by clicking the "play" button (added below) or
-   * dragging the canvas. Without this, hover at 10k nodes continually
-   * runs picking + simulation in parallel and the page jitters. */
-  useEffect(() => {
-    const id = setTimeout(() => {
-      const c = cosmoRef.current as any;
-      if (c && typeof c.pause === "function") c.pause();
-    }, 8000);
-    return () => clearTimeout(id);
-  }, [config]);
 
   return (
     <>
@@ -266,13 +161,6 @@ export default function Graph() {
         <button style={{ marginLeft: 6 }} onClick={() => cosmoRef.current?.fitView()}>
           fit
         </button>
-        <button style={{ marginLeft: 6 }} onClick={() => {
-          const c = cosmoRef.current as any;
-          if (!c) return;
-          if (c.isSimulationRunning) c.pause(); else c.unpause?.() ?? c.start?.();
-        }}>
-          play / pause
-        </button>
         <span className="small" style={{ marginLeft: 14 }}>
           {counts
             ? `${counts.nodes.toLocaleString()} nodes · ${counts.links.toLocaleString()} edges (drag to pan, scroll to zoom)`
@@ -287,22 +175,50 @@ export default function Graph() {
         <Cosmograph
           ref={cosmoRef as any}
           {...config}
-          style={FILL}
+          style={{ width: "100%", height: "100%" }}
         />
 
-        {/* Persistent tooltip — never re-rendered by React. The cosmograph
-         * hover handler writes directly to ref.innerHTML + style.left/top. */}
-        <div
-          ref={tipRef}
-          style={{
-            position: "fixed", display: "none", left: 0, top: 0,
+        {hover && hoverPos && (
+          <div style={{
+            position: "fixed",
+            left: hoverPos.x + 12, top: hoverPos.y + 12,
             background: "#14181d", border: "1px solid #2a3642", borderRadius: 3,
-            padding: "6px 10px", pointerEvents: "none", maxWidth: 320,
-            fontSize: 12, color: "#d8dee6",
+            padding: "6px 10px", pointerEvents: "none", maxWidth: 320, fontSize: 12,
             boxShadow: "0 4px 14px rgba(0,0,0,0.5)", zIndex: 10
-          }}
-        />
-
+          }}>
+            <div style={{ color: "#8fc0ff" }}>{hover.ip}:{hover.port}</div>
+            <div>
+              {hover.country && (
+                <span style={{ marginRight: 6 }} title={countryName(hover.country)}>
+                  {countryFlag(hover.country)} {hover.country}
+                </span>
+              )}
+              <span style={{ color: "#ddd" }}>
+                {hover.v_string ? decodeVString(hover.v_string)
+                                : <span className="dim">unknown client</span>}
+              </span>
+            </div>
+            <div className="small">
+              degree {hover.deg}
+              {hover.as_src != null && hover.as_dst != null &&
+                ` · s:${hover.as_src} d:${hover.as_dst}`}
+              {(hover.same_ip ?? 0) >= 2 && ` · ${hover.same_ip} ports/ip`}
+            </div>
+            {!!hover.likely_crawler && (
+              <div style={{ color: "#ff9bb5", marginTop: 3 }}>
+                likely crawler
+                {hover.as_dst === 0 && (hover.as_src ?? 0) >= 50 ? " — silent taker" : ""}
+                {(hover.same_ip ?? 0) >= 3 ? " — multi-port host" : ""}
+              </div>
+            )}
+            {hover.supports_bep51 === 1 && (
+              <div style={{ color: "#6edd8a", marginTop: 3 }}>
+                ✓ BEP 51 (sample_infohashes) capable
+              </div>
+            )}
+            <div className="small">{hex(hover.id, 28)}</div>
+          </div>
+        )}
 
         {/* collapsible legend overlay (kept as-is from canvas version) */}
         <div style={{
