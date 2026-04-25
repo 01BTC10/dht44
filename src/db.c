@@ -591,12 +591,41 @@ db_select_graph_json(int limit)
 {
     if (!g_db) return NULL;
     if (limit <= 0) limit = 300;
-    /* Hard ceiling so a careless `?limit=all` can't drag the server. The
-     * canvas force-sim tops out around 5k nodes anyway. */
     if (limit > 10000) limit = 10000;
 
-    /* Top-N peers by degree: count appearances as src OR dst in edges.
-     * Use a CTE to express the union count, then a final LIMIT. */
+    /*
+     * Two-pass picker:
+     *
+     * Pass 1 — pull a CANDIDATE set (3× the requested limit, capped at
+     *   10k) with the cheap "overall edge degree" ranking.
+     * Pass 2 — for each candidate count its INTERNAL degree (edges where
+     *   both endpoints are in the candidate set), then take the top-N
+     *   by that internal degree.
+     *
+     * Result: every node we return has at least one visible edge to
+     * another returned node, and the most "internally connected" peers
+     * make the cut. No orphan periphery bubbles, no separate filter pass.
+     */
+    int cand_limit = limit * 3;
+    if (cand_limit > 10000) cand_limit = 10000;
+
+    typedef struct {
+        char    ip[INET_ADDRSTRLEN];
+        int     port;
+        int     overall_deg;
+        int     internal_deg;
+        int     keep;            /* set if this candidate makes the final cut */
+        const void *v;            /* pointer into the row's blob — copied later */
+        int     v_len;
+        int64_t as_src, as_dst, same_ip;
+        json_t *node_json;        /* allocated lazily on keep */
+    } cand_t;
+
+    cand_t *cands = calloc((size_t)cand_limit, sizeof(*cands));
+    if (!cands) return NULL;
+    int cand_n = 0;
+
+    /* --- Pass 1: candidate set by overall degree ------------------- */
     sqlite3_stmt *s = NULL;
     const char *sql_top =
         "WITH src AS (SELECT src_ip ip, src_port port, COUNT(*) c FROM edges GROUP BY 1,2),"
@@ -619,77 +648,115 @@ db_select_graph_json(int limit)
         "   LEFT JOIN ipc  ON ipc.ip=a.ip"
         "  ORDER BY deg DESC LIMIT ?";
     if (sqlite3_prepare_v2(g_db, sql_top, -1, &s, NULL) != SQLITE_OK) {
-        log_err("prepare graph-top"); return NULL;
+        log_err("prepare graph-top"); free(cands); return NULL;
     }
-    sqlite3_bind_int(s, 1, limit);
-
-    json_t *nodes = json_array();
-    /* collect a set of (ip, port) for subsequent edge filter */
-    typedef struct { char ip[INET_ADDRSTRLEN]; int port; } nk;
-    nk *set = calloc((size_t)limit, sizeof(*set));
-    int set_n = 0;
-    while (set && sqlite3_step(s) == SQLITE_ROW) {
-        const char *ip = (const char *)sqlite3_column_text(s, 0);
-        int port       = sqlite3_column_int(s, 1);
-        int deg        = sqlite3_column_int(s, 2);
-        const void *v  = sqlite3_column_blob(s, 3);
-        int v_len      = sqlite3_column_bytes(s, 3);
-        int64_t as_src  = sqlite3_column_int64(s, 4);
-        int64_t as_dst  = sqlite3_column_int64(s, 5);
-        int64_t same_ip = sqlite3_column_int64(s, 6);
-
-        char id[INET_ADDRSTRLEN + 8];
-        snprintf(id, sizeof(id), "%s:%d", ip, port);
-
-        json_t *o = json_object();
-        json_object_set_new(o, "id",   json_string(id));
-        json_object_set_new(o, "ip",   json_string(ip));
-        json_object_set_new(o, "port", json_integer(port));
-        json_object_set_new(o, "deg",  json_integer(deg));
-        json_set_blob_hex(o, "v_string", v, v_len);
-        json_object_set_new(o, "as_src",  json_integer(as_src));
-        json_object_set_new(o, "as_dst",  json_integer(as_dst));
-        json_object_set_new(o, "same_ip", json_integer(same_ip));
-        int crawler = (as_dst == 0 && as_src >= 50) || same_ip >= 3;
-        json_object_set_new(o, "likely_crawler", json_integer(crawler ? 1 : 0));
-        json_array_append_new(nodes, o);
-
-        if (set_n < limit) {
-            snprintf(set[set_n].ip, sizeof(set[set_n].ip), "%s", ip);
-            set[set_n].port = port;
-            set_n++;
+    sqlite3_bind_int(s, 1, cand_limit);
+    while (cand_n < cand_limit && sqlite3_step(s) == SQLITE_ROW) {
+        cand_t *c = &cands[cand_n++];
+        snprintf(c->ip, sizeof(c->ip), "%s",
+                 (const char *)sqlite3_column_text(s, 0));
+        c->port        = sqlite3_column_int(s, 1);
+        c->overall_deg = sqlite3_column_int(s, 2);
+        /* sqlite3_column_blob pointers are valid only until the next step,
+         * so copy the v_string into our own buffer. */
+        const void *vb = sqlite3_column_blob(s, 3);
+        int vbl = sqlite3_column_bytes(s, 3);
+        if (vb && vbl > 0) {
+            void *copy = malloc((size_t)vbl);
+            if (copy) { memcpy(copy, vb, (size_t)vbl); c->v = copy; c->v_len = vbl; }
         }
+        c->as_src  = sqlite3_column_int64(s, 4);
+        c->as_dst  = sqlite3_column_int64(s, 5);
+        c->same_ip = sqlite3_column_int64(s, 6);
     }
     sqlite3_finalize(s);
 
-    /* Fetch edges among the set. Simpler and still fast at this scale: pull
-     * all edges and filter in-process via a small open-hash lookup. */
-    json_t *links = json_array();
+    /* --- Pass 2: count internal-degree by walking edges ----------- */
     sqlite3_stmt *e = NULL;
     if (sqlite3_prepare_v2(g_db,
             "SELECT src_ip,src_port,dst_ip,dst_port FROM edges",
             -1, &e, NULL) == SQLITE_OK) {
-
-        /* build a sorted search index for O(log n) endpoint membership */
-        int (*find)(const char *ip, int port, nk *tbl, int n) =
-            NULL; (void)find;
-
-        while (set && sqlite3_step(e) == SQLITE_ROW) {
+        while (sqlite3_step(e) == SQLITE_ROW) {
             const char *sip = (const char *)sqlite3_column_text(e, 0);
             int sport = sqlite3_column_int(e, 1);
             const char *dip = (const char *)sqlite3_column_text(e, 2);
             int dport = sqlite3_column_int(e, 3);
-
-            int sok = 0, dok = 0;
-            for (int i = 0; i < set_n; i++) {
-                if (!sok && set[i].port == sport && strcmp(set[i].ip, sip)==0) sok = 1;
-                if (!dok && set[i].port == dport && strcmp(set[i].ip, dip)==0) dok = 1;
-                if (sok && dok) break;
+            int si = -1, di = -1;
+            for (int i = 0; i < cand_n; i++) {
+                if (si < 0 && cands[i].port == sport && strcmp(cands[i].ip, sip)==0) si = i;
+                if (di < 0 && cands[i].port == dport && strcmp(cands[i].ip, dip)==0) di = i;
+                if (si >= 0 && di >= 0) break;
             }
-            if (sok && dok) {
+            if (si >= 0 && di >= 0) {
+                cands[si].internal_deg++;
+                cands[di].internal_deg++;
+            }
+        }
+        sqlite3_finalize(e);
+    }
+
+    /* --- Top-N by internal degree (simple selection, N at most 10k) --- */
+    /* Mark `keep=1` on the top-N. Tie-break by overall_deg. */
+    int kept = 0;
+    while (kept < limit) {
+        int best = -1;
+        for (int i = 0; i < cand_n; i++) {
+            if (cands[i].keep || cands[i].internal_deg == 0) continue;
+            if (best < 0
+                || cands[i].internal_deg > cands[best].internal_deg
+                || (cands[i].internal_deg == cands[best].internal_deg
+                    && cands[i].overall_deg > cands[best].overall_deg))
+                best = i;
+        }
+        if (best < 0) break;
+        cands[best].keep = 1;
+        kept++;
+    }
+
+    /* --- Emit JSON for kept nodes -------------------------------- */
+    json_t *nodes = json_array();
+    for (int i = 0; i < cand_n; i++) {
+        if (!cands[i].keep) continue;
+        char id[INET_ADDRSTRLEN + 8];
+        snprintf(id, sizeof(id), "%s:%d", cands[i].ip, cands[i].port);
+        json_t *o = json_object();
+        json_object_set_new(o, "id",   json_string(id));
+        json_object_set_new(o, "ip",   json_string(cands[i].ip));
+        json_object_set_new(o, "port", json_integer(cands[i].port));
+        /* "deg" reports the in-result degree — what the user actually sees. */
+        json_object_set_new(o, "deg",  json_integer(cands[i].internal_deg));
+        json_set_blob_hex(o, "v_string", cands[i].v, cands[i].v_len);
+        json_object_set_new(o, "as_src",  json_integer(cands[i].as_src));
+        json_object_set_new(o, "as_dst",  json_integer(cands[i].as_dst));
+        json_object_set_new(o, "same_ip", json_integer(cands[i].same_ip));
+        int crawler = (cands[i].as_dst == 0 && cands[i].as_src >= 50)
+                   || cands[i].same_ip >= 3;
+        json_object_set_new(o, "likely_crawler", json_integer(crawler ? 1 : 0));
+        json_array_append_new(nodes, o);
+        cands[i].node_json = o;     /* pointer ref, owned by `nodes` */
+    }
+
+    /* --- Emit edges between kept nodes --------------------------- */
+    json_t *links = json_array();
+    if (sqlite3_prepare_v2(g_db,
+            "SELECT src_ip,src_port,dst_ip,dst_port FROM edges",
+            -1, &e, NULL) == SQLITE_OK) {
+        while (sqlite3_step(e) == SQLITE_ROW) {
+            const char *sip = (const char *)sqlite3_column_text(e, 0);
+            int sport = sqlite3_column_int(e, 1);
+            const char *dip = (const char *)sqlite3_column_text(e, 2);
+            int dport = sqlite3_column_int(e, 3);
+            int si = -1, di = -1;
+            for (int i = 0; i < cand_n; i++) {
+                if (!cands[i].keep) continue;
+                if (si < 0 && cands[i].port == sport && strcmp(cands[i].ip, sip)==0) si = i;
+                if (di < 0 && cands[i].port == dport && strcmp(cands[i].ip, dip)==0) di = i;
+                if (si >= 0 && di >= 0) break;
+            }
+            if (si >= 0 && di >= 0) {
                 char sbuf[INET_ADDRSTRLEN+8], dbuf[INET_ADDRSTRLEN+8];
-                snprintf(sbuf, sizeof(sbuf), "%s:%d", sip, sport);
-                snprintf(dbuf, sizeof(dbuf), "%s:%d", dip, dport);
+                snprintf(sbuf, sizeof(sbuf), "%s:%d", cands[si].ip, cands[si].port);
+                snprintf(dbuf, sizeof(dbuf), "%s:%d", cands[di].ip, cands[di].port);
                 json_t *lo = json_object();
                 json_object_set_new(lo, "src", json_string(sbuf));
                 json_object_set_new(lo, "dst", json_string(dbuf));
@@ -698,7 +765,12 @@ db_select_graph_json(int limit)
         }
         sqlite3_finalize(e);
     }
-    free(set);
+
+    /* Free per-candidate v_string copies. */
+    for (int i = 0; i < cand_n; i++) {
+        if (cands[i].v) free((void *)cands[i].v);
+    }
+    free(cands);
 
     json_t *env = json_object();
     json_object_set_new(env, "nodes", nodes);

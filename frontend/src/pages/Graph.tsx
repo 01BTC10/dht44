@@ -1,16 +1,13 @@
 import { useEffect, useRef, useState } from "react";
-import { Cosmograph, prepareCosmographData } from "@cosmograph/react";
-import type { CosmographConfig, CosmographRef } from "@cosmograph/react";
 import { countryFlag, countryName, decodeVString, hex } from "../ws";
 
 /*
  * Bubble graph: nodes are peers, an edge A→B means A returned B in a
  * compact-nodes response (i.e. B is in A's routing table per A's own view).
- *
- * GPU-rendered via Cosmograph (WebGL) so it scales to ~100k+ nodes at 60fps.
+ * Canvas-based force-directed layout — no external dep.
  */
 
-type RawNode = {
+type Node = {
   id: string;
   ip: string;
   port: number;
@@ -21,126 +18,294 @@ type RawNode = {
   as_dst?: number;
   same_ip?: number;
   likely_crawler?: number;
-  supports_bep51?: number | null;
+
+  /* sim state */
+  x: number; y: number; vx: number; vy: number; r: number;
 };
 
-type RawLink = { src: string; dst: string; source?: string; target?: string };
+type Link = { src: string; dst: string };
 
-/* Deterministic ISO → HSL → [r,g,b,a] for Cosmograph's pointColor field. */
-function colorFor(iso?: string | null): [number, number, number, number] {
-  let h = 210, s = 10, l = 50;
-  if (iso && iso.length === 2) {
-    let hash = 0;
-    for (let i = 0; i < iso.length; i++) hash = (hash * 31 + iso.charCodeAt(i)) >>> 0;
-    h = hash % 360;
-    s = 62;
-    l = 55;
-  }
-  /* HSL → RGB */
-  const c = (1 - Math.abs(2 * (l/100) - 1)) * (s/100);
-  const x = c * (1 - Math.abs(((h/60) % 2) - 1));
-  const m = (l/100) - c / 2;
-  let r = 0, g = 0, b = 0;
-  if (h < 60)       { r = c; g = x; }
-  else if (h < 120) { r = x; g = c; }
-  else if (h < 180) { g = c; b = x; }
-  else if (h < 240) { g = x; b = c; }
-  else if (h < 300) { r = x; b = c; }
-  else              { r = c; b = x; }
-  return [Math.round((r + m) * 255), Math.round((g + m) * 255), Math.round((b + m) * 255), 230];
+/* Simple deterministic palette from ISO code → HSL */
+function colorFor(iso?: string | null): string {
+  if (!iso) return "hsl(210 10% 50%)";
+  let h = 0;
+  for (let i = 0; i < iso.length; i++) h = (h * 31 + iso.charCodeAt(i)) >>> 0;
+  return `hsl(${h % 360} 62% 55%)`;
 }
 
 export default function Graph() {
-  const cosmoRef     = useRef<CosmographRef>(null);
-  const [limit, setLimit]       = useState(1000);
+  const canvasRef  = useRef<HTMLCanvasElement>(null);
+  const wrapRef    = useRef<HTMLDivElement>(null);
+  const [limit, setLimit]       = useState(300);
   const [loading, setLoading]   = useState(false);
-  const [config, setConfig]     = useState<CosmographConfig>({});
   const [counts, setCounts]     = useState<{ nodes: number; links: number } | null>(null);
-  const [hover, setHover]       = useState<RawNode | null>(null);
-  const [hoverPos, setHoverPos] = useState<{ x: number; y: number } | null>(null);
+  const [hover, setHover]       = useState<Node | null>(null);
   const [showLegend, setShowLegend] = useState(true);
+  const mouse                    = useRef({ x: 0, y: 0, dragging: false, dragNode: null as Node | null });
+  const view                     = useRef({ tx: 0, ty: 0, k: 1 });
+
+  /* Live simulation state lives in refs, not React state — ~60 fps. */
+  const sim    = useRef<{ nodes: Node[]; links: Link[] }>({ nodes: [], links: [] });
+  /* Alpha cools each frame; energy injected on user interaction. */
+  const alpha  = useRef(1.0);
 
   const load = async () => {
     setLoading(true);
     try {
       const r = await fetch(`/api/graph?limit=${limit}`);
       const g = await r.json();
-      const points: RawNode[] = (g.nodes ?? []).map((n: RawNode) => ({
-        ...n,
-        /* Pre-compute per-point color + size as fields Cosmograph can read.
-         * Cosmograph applies pointColorBy/pointSizeBy without further code. */
+      /* Spread nodes out more for larger graphs so initial repulsion doesn't
+       * spike from dense overlap. */
+      const N = g.nodes?.length || 1;
+      const R = 120 + Math.sqrt(N) * 30;
+      const nodes: Node[] = (g.nodes || []).map((n: any, i: number) => ({
+        id: n.id, ip: n.ip, port: n.port, deg: n.deg,
+        v_string: n.v_string, country: n.country,
+        as_src: n.as_src, as_dst: n.as_dst, same_ip: n.same_ip,
+        likely_crawler: n.likely_crawler,
+        x: Math.cos((i / N) * Math.PI * 2) * R * (0.6 + 0.4 * Math.random()),
+        y: Math.sin((i / N) * Math.PI * 2) * R * (0.6 + 0.4 * Math.random()),
+        vx: 0, vy: 0,
+        r: Math.max(3, Math.min(18, 2 + Math.sqrt(n.deg || 1) * 1.4)),
       }));
-      /* Cosmograph needs source/target keys, not src/dst. */
-      const links: RawLink[] = (g.links ?? [])
-        .map((e: RawLink) => ({ source: e.src, target: e.dst }))
-        .filter((e: RawLink) => e.source !== e.target);
-
-      /* Inject precomputed color + size into each row so Cosmograph can
-       * map them via pointColorByFn equivalents. Wider size range than
-       * before (was 2..18) so hub peers really stand out. */
-      for (const n of points as any[]) {
-        const c = colorFor(n.country);
-        n._color = `rgba(${c[0]},${c[1]},${c[2]},${(c[3]/255).toFixed(2)})`;
-        n._size  = Math.max(4, Math.min(32, 4 + Math.sqrt(n.deg || 1) * 2.2));
-      }
-
-      const result = await prepareCosmographData(
-        {
-          points: { pointIdBy: "id" },
-          links:  { linkSourceBy: "source", linkTargetsBy: ["target"] },
-        },
-        points as any,
-        links as any,
+      const links: Link[] = (g.links || []).filter(
+        (e: Link) => e.src !== e.dst
       );
-      if (result) {
-        const { points: P, links: L, cosmographConfig } = result;
-        setConfig({
-          points: P,
-          links:  L,
-          ...cosmographConfig,
-
-          /* visual style — "direct" means the value in the field IS the
-           * final color/size; we pre-baked them above as _color and _size. */
-          backgroundColor:        "#0a0c0f",
-          pointColorBy:           "_color",
-          pointColorStrategy:     "direct",
-          pointSizeBy:            "_size",
-          pointSizeStrategy:      "direct",
-          /* Multiplier on top of _size so hub peers are very visible, and
-           * grow them with zoom so dense clusters stay readable when you
-           * zoom in. */
-          pointSizeScale:         2.0,
-          scalePointsOnZoom:      true,
-          linkColor:              "rgba(160,195,235,0.42)",
-          linkWidth:              0.6,
-          linkArrows:             false,
-
-          /* simulation tuning — dimensionless 0..1 in cosmograph */
-          simulationGravity:      0.06,
-          simulationCenter:       0.0,
-          simulationRepulsion:    1.0,
-          simulationLinkSpring:   0.4,
-          simulationLinkDistance: 6,
-          simulationFriction:     0.86,
-
-          /* hover: signature is (index, pointPosition, event, isSelected). */
-          onPointMouseOver: (i: number, _pos: [number, number], ev: any) => {
-            const n = (points as any)[i];
-            if (n) {
-              setHover(n);
-              const me = ev as MouseEvent;
-              setHoverPos({ x: me.clientX, y: me.clientY });
-            }
-          },
-          onPointMouseOut: () => { setHover(null); },
-        });
-      }
-      setCounts({ nodes: points.length, links: links.length });
+      sim.current = { nodes, links };
+      alpha.current = 1.0;          /* fresh heat for new layout */
+      setCounts({ nodes: nodes.length, links: links.length });
     } catch (e) { /* ignore */ }
     setLoading(false);
   };
 
   useEffect(() => { load(); /* eslint-disable-next-line */ }, [limit]);
+
+  /* Force simulation + render loop */
+  useEffect(() => {
+    const canvas = canvasRef.current!;
+    const ctx    = canvas.getContext("2d")!;
+    let raf = 0;
+    let running = true;
+
+    const resize = () => {
+      const r = wrapRef.current!.getBoundingClientRect();
+      canvas.width  = r.width;
+      canvas.height = r.height;
+    };
+    resize();
+    window.addEventListener("resize", resize);
+
+    const step = () => {
+      if (!running) return;
+      const { nodes, links } = sim.current;
+      const W = canvas.width, H = canvas.height;
+      const byId = new Map(nodes.map(n => [n.id, n]));
+      const a_ = alpha.current;
+
+      /* Spatial grid for O(n) repulsion: each node only pushes against
+       * neighbours in its own cell + the 8 adjacent cells. A larger cell
+       * means clusters feel each other from further away and drift apart
+       * instead of bunching in the middle. */
+      const CELL = 320;
+      const cells = new Map<string, Node[]>();
+      for (const n of nodes) {
+        const k = Math.floor(n.x / CELL) + "," + Math.floor(n.y / CELL);
+        let c = cells.get(k);
+        if (!c) { c = []; cells.set(k, c); }
+        c.push(n);
+      }
+
+      /* Scale repulsion strength down with density so big graphs don't blow
+       * up. The base strength is high so non-connected peers actually push
+       * each other apart across cluster boundaries. */
+      const REP = 5500 * Math.min(1, 300 / Math.max(50, nodes.length));
+
+      for (const n of nodes) {
+        const gx = Math.floor(n.x / CELL), gy = Math.floor(n.y / CELL);
+        for (let dx = -1; dx <= 1; dx++) {
+          for (let dy = -1; dy <= 1; dy++) {
+            const bucket = cells.get((gx + dx) + "," + (gy + dy));
+            if (!bucket) continue;
+            for (const m of bucket) {
+              if (m === n) continue;
+              let rx = n.x - m.x, ry = n.y - m.y;
+              let d2 = rx * rx + ry * ry;
+              if (d2 < 0.01) { rx = Math.random() - 0.5; ry = Math.random() - 0.5; d2 = 1; }
+              if (d2 > CELL * CELL) continue;        /* outside neighbourhood */
+              const d = Math.sqrt(d2);
+              const f = (REP / d2) * a_;
+              n.vx += (rx / d) * f;
+              n.vy += (ry / d) * f;
+            }
+          }
+        }
+      }
+
+      /* Springs along edges. Weaker than before: a single cross-cluster edge
+       * won't yank two whole clusters together, but dense clusters still pull
+       * their members into a readable ball. */
+      for (const e of links) {
+        const a = byId.get(e.src), b = byId.get(e.dst);
+        if (!a || !b) continue;
+        const dx = b.x - a.x, dy = b.y - a.y;
+        const d  = Math.sqrt(dx * dx + dy * dy) || 1;
+        const target = 80;
+        const f = (d - target) * 0.025 * a_;
+        const fx = (dx / d) * f, fy = (dy / d) * f;
+        a.vx += fx; a.vy += fy;
+        b.vx -= fx; b.vy -= fy;
+      }
+      /* Bounded gravity: zero pull inside the comfort radius, a gentle
+       * centripetal force only when a node drifts outside. Clusters can
+       * spread freely until they reach the boundary, which prevents the
+       * "everything collapses to origin" problem without letting the graph
+       * escape the viewport. */
+      const COMFORT = 600;
+      for (const n of nodes) {
+        const r2 = n.x * n.x + n.y * n.y;
+        if (r2 > COMFORT * COMFORT) {
+          const r = Math.sqrt(r2);
+          const pull = (r - COMFORT) * 0.004 * a_;
+          n.vx -= (n.x / r) * pull;
+          n.vy -= (n.y / r) * pull;
+        }
+      }
+      /* integrate with damping + hard velocity cap to prevent runaway */
+      const drag = mouse.current.dragNode;
+      const VMAX = 12;
+      for (const n of nodes) {
+        if (n === drag) continue;
+        n.vx *= 0.82; n.vy *= 0.82;
+        /* clamp magnitude */
+        const sp2 = n.vx * n.vx + n.vy * n.vy;
+        if (sp2 > VMAX * VMAX) {
+          const k = VMAX / Math.sqrt(sp2);
+          n.vx *= k; n.vy *= k;
+        }
+        n.x += n.vx; n.y += n.vy;
+      }
+      /* cool the simulation so it settles instead of jittering forever */
+      if (alpha.current > 0.05) alpha.current *= 0.9965;
+
+      /* === render === */
+      ctx.clearRect(0, 0, W, H);
+      ctx.save();
+      ctx.translate(W / 2 + view.current.tx, H / 2 + view.current.ty);
+      ctx.scale(view.current.k, view.current.k);
+
+      /* Edges: brighter base color, and highlight edges touching the
+       * hovered/dragged node so the graph stays readable in dark mode. */
+      const focus = (drag ?? hover) as Node | null;
+      ctx.lineWidth = 0.8;
+      ctx.strokeStyle = "rgba(160, 195, 235, 0.42)";
+      for (const e of links) {
+        const a = byId.get(e.src), b = byId.get(e.dst);
+        if (!a || !b) continue;
+        if (focus && (a === focus || b === focus)) continue;    /* draw last */
+        ctx.beginPath();
+        ctx.moveTo(a.x, a.y);
+        ctx.lineTo(b.x, b.y);
+        ctx.stroke();
+      }
+      if (focus) {
+        ctx.lineWidth = 1.4;
+        ctx.strokeStyle = "rgba(255, 220, 120, 0.95)";
+        for (const e of links) {
+          const a = byId.get(e.src), b = byId.get(e.dst);
+          if (!a || !b) continue;
+          if (a !== focus && b !== focus) continue;
+          ctx.beginPath();
+          ctx.moveTo(a.x, a.y);
+          ctx.lineTo(b.x, b.y);
+          ctx.stroke();
+        }
+      }
+
+      for (const n of nodes) {
+        ctx.beginPath();
+        ctx.arc(n.x, n.y, n.r, 0, Math.PI * 2);
+        ctx.fillStyle = colorFor(n.country);
+        ctx.fill();
+        /* Crawler ring: dashed red outline on peers flagged by the heuristic. */
+        if (n.likely_crawler) {
+          ctx.lineWidth = 1.6;
+          ctx.strokeStyle = "rgba(255, 90, 120, 0.95)";
+          ctx.setLineDash([3, 2]);
+          ctx.stroke();
+          ctx.setLineDash([]);
+        }
+        if (n === hover || n === drag) {
+          ctx.lineWidth = 1.4;
+          ctx.strokeStyle = "#fff";
+          ctx.stroke();
+        }
+      }
+      ctx.restore();
+
+      raf = requestAnimationFrame(step);
+    };
+    raf = requestAnimationFrame(step);
+
+    return () => {
+      running = false;
+      cancelAnimationFrame(raf);
+      window.removeEventListener("resize", resize);
+    };
+  }, [hover]);
+
+  /* Convert screen coords → world coords (inverse of our transform). */
+  const toWorld = (sx: number, sy: number) => {
+    const W = canvasRef.current!.width, H = canvasRef.current!.height;
+    return {
+      x: (sx - W / 2 - view.current.tx) / view.current.k,
+      y: (sy - H / 2 - view.current.ty) / view.current.k,
+    };
+  };
+
+  const hit = (wx: number, wy: number): Node | null => {
+    for (const n of sim.current.nodes) {
+      const dx = n.x - wx, dy = n.y - wy;
+      if (dx * dx + dy * dy <= (n.r + 2) * (n.r + 2)) return n;
+    }
+    return null;
+  };
+
+  const onDown = (e: React.MouseEvent) => {
+    const rect = canvasRef.current!.getBoundingClientRect();
+    const sx = e.clientX - rect.left, sy = e.clientY - rect.top;
+    mouse.current.x = sx; mouse.current.y = sy;
+    mouse.current.dragging = true;
+    const w = toWorld(sx, sy);
+    mouse.current.dragNode = hit(w.x, w.y);
+    alpha.current = Math.max(alpha.current, 0.4);
+  };
+  const onMove = (e: React.MouseEvent) => {
+    const rect = canvasRef.current!.getBoundingClientRect();
+    const sx = e.clientX - rect.left, sy = e.clientY - rect.top;
+    const prev = { x: mouse.current.x, y: mouse.current.y };
+    mouse.current.x = sx; mouse.current.y = sy;
+    const w = toWorld(sx, sy);
+
+    if (mouse.current.dragging) {
+      if (mouse.current.dragNode) {
+        mouse.current.dragNode.x = w.x;
+        mouse.current.dragNode.y = w.y;
+        mouse.current.dragNode.vx = 0;
+        mouse.current.dragNode.vy = 0;
+      } else {
+        view.current.tx += sx - prev.x;
+        view.current.ty += sy - prev.y;
+      }
+    } else {
+      setHover(hit(w.x, w.y));
+    }
+  };
+  const onUp = () => { mouse.current.dragging = false; mouse.current.dragNode = null; };
+  const onWheel = (e: React.WheelEvent) => {
+    const factor = Math.pow(1.0015, -e.deltaY);
+    const nk = Math.max(0.2, Math.min(5, view.current.k * factor));
+    view.current.k = nk;
+  };
 
   return (
     <>
@@ -149,42 +314,44 @@ export default function Graph() {
           nodes:{" "}
           <select value={limit} onChange={e => setLimit(parseInt(e.target.value))}>
             <option value={100}>100</option>
+            <option value={200}>200</option>
+            <option value={300}>300</option>
             <option value={500}>500</option>
-            <option value={1000}>1,000</option>
-            <option value={5000}>5,000</option>
-            <option value={10000}>10,000 (max)</option>
+            <option value={1000}>1000</option>
           </select>
         </label>
         <button style={{ marginLeft: 10 }} onClick={load} disabled={loading}>
           {loading ? "loading…" : "reload"}
         </button>
-        <button style={{ marginLeft: 6 }} onClick={() => cosmoRef.current?.fitView()}>
-          fit
-        </button>
         <span className="small" style={{ marginLeft: 14 }}>
           {counts
-            ? `${counts.nodes.toLocaleString()} nodes · ${counts.links.toLocaleString()} edges (drag to pan, scroll to zoom)`
+            ? `${counts.nodes} nodes · ${counts.links} edges (drag bubbles, drag bg to pan, scroll to zoom)`
             : ""}
         </span>
       </div>
 
-      <div style={{ position: "relative", width: "100%",
-                    height: "calc(100vh - 170px)",
-                    background: "#0a0c0f", border: "1px solid #232a31",
-                    borderRadius: 3, overflow: "hidden" }}>
-        <Cosmograph
-          ref={cosmoRef as any}
-          {...config}
-          style={{ width: "100%", height: "100%" }}
+      <div
+        ref={wrapRef}
+        style={{ position: "relative", width: "100%",
+                 /* fill the remaining viewport: viewport minus everything
+                  * above (app header, stats bar, tab nav, graph toolbar). */
+                 height: "calc(100vh - 170px)",
+                 background: "#0a0c0f", border: "1px solid #232a31",
+                 borderRadius: 3, overflow: "hidden" }}
+      >
+        <canvas
+          ref={canvasRef}
+          onMouseDown={onDown} onMouseMove={onMove} onMouseUp={onUp}
+          onMouseLeave={onUp}  onWheel={onWheel}
+          style={{ display: "block", width: "100%", height: "100%",
+                   cursor: mouse.current.dragging ? "grabbing" : "default" }}
         />
-
-        {hover && hoverPos && (
+        {hover && (
           <div style={{
-            position: "fixed",
-            left: hoverPos.x + 12, top: hoverPos.y + 12,
+            position: "absolute", left: mouse.current.x + 12, top: mouse.current.y + 12,
             background: "#14181d", border: "1px solid #2a3642", borderRadius: 3,
-            padding: "6px 10px", pointerEvents: "none", maxWidth: 320, fontSize: 12,
-            boxShadow: "0 4px 14px rgba(0,0,0,0.5)", zIndex: 10
+            padding: "6px 10px", pointerEvents: "none", maxWidth: 280, fontSize: 12,
+            boxShadow: "0 4px 14px rgba(0,0,0,0.5)"
           }}>
             <div style={{ color: "#8fc0ff" }}>{hover.ip}:{hover.port}</div>
             <div>
@@ -194,8 +361,7 @@ export default function Graph() {
                 </span>
               )}
               <span style={{ color: "#ddd" }}>
-                {hover.v_string ? decodeVString(hover.v_string)
-                                : <span className="dim">unknown client</span>}
+                {hover.v_string ? decodeVString(hover.v_string) : <span className="dim">unknown client</span>}
               </span>
             </div>
             <div className="small">
@@ -207,58 +373,112 @@ export default function Graph() {
             {!!hover.likely_crawler && (
               <div style={{ color: "#ff9bb5", marginTop: 3 }}>
                 likely crawler
-                {hover.as_dst === 0 && (hover.as_src ?? 0) >= 50 ? " — silent taker" : ""}
-                {(hover.same_ip ?? 0) >= 3 ? " — multi-port host" : ""}
-              </div>
-            )}
-            {hover.supports_bep51 === 1 && (
-              <div style={{ color: "#6edd8a", marginTop: 3 }}>
-                ✓ BEP 51 (sample_infohashes) capable
+                {hover.as_dst === 0 && (hover.as_src ?? 0) >= 50
+                  ? " — silent taker" : ""}
+                {(hover.same_ip ?? 0) >= 3
+                  ? " — multi-port host" : ""}
               </div>
             )}
             <div className="small">{hex(hover.id, 28)}</div>
           </div>
         )}
 
-        {/* collapsible legend overlay (kept as-is from canvas version) */}
+        {/* Collapsible legend overlay */}
         <div style={{
           position: "absolute", top: 10, right: 10,
           background: "rgba(20,24,29,0.94)", border: "1px solid #2a3642",
           borderRadius: 3, padding: showLegend ? "8px 12px" : "4px 10px",
-          fontSize: 11, color: "#d8dee6", maxWidth: 260, lineHeight: 1.45,
-          boxShadow: "0 4px 14px rgba(0,0,0,0.4)", zIndex: 5
+          fontSize: 11, color: "#d8dee6", maxWidth: 280, lineHeight: 1.45,
+          boxShadow: "0 4px 14px rgba(0,0,0,0.4)"
         }}>
-          <div onClick={() => setShowLegend(s => !s)}
-               style={{ display: "flex", alignItems: "center",
-                        justifyContent: "space-between", gap: 10,
-                        cursor: "pointer", color: "#8fc0ff",
-                        textTransform: "uppercase", letterSpacing: 0.5, fontSize: 10 }}>
-            <span>legend (GPU)</span>
+          <div style={{
+            display: "flex", alignItems: "center", justifyContent: "space-between",
+            gap: 10, cursor: "pointer", color: "#8fc0ff",
+            textTransform: "uppercase", letterSpacing: 0.5, fontSize: 10
+          }}
+               onClick={() => setShowLegend(s => !s)}>
+            <span>legend</span>
             <span style={{ color: "#8892a0" }}>{showLegend ? "−" : "+"}</span>
           </div>
+
           {showLegend && (
             <div style={{ marginTop: 8 }}>
-              <div style={{ color: "#a0a8b0", marginBottom: 8 }}>
-                <b style={{ color: "#8fc0ff" }}>bubble size</b>
-                <br/>= log(degree). Larger = more edges touch this peer.
+              <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
+                <span style={{
+                  display: "inline-block", width: 6, height: 6, borderRadius: "50%",
+                  background: "hsl(210 62% 55%)"
+                }} />
+                <span style={{
+                  display: "inline-block", width: 12, height: 12, borderRadius: "50%",
+                  background: "hsl(210 62% 55%)"
+                }} />
+                <span style={{
+                  display: "inline-block", width: 18, height: 18, borderRadius: "50%",
+                  background: "hsl(210 62% 55%)"
+                }} />
+                <b style={{ color: "#8fc0ff", marginLeft: 4 }}>bubble size</b>
               </div>
               <div style={{ color: "#a0a8b0", marginBottom: 8 }}>
-                <b style={{ color: "#8fc0ff" }}>color</b>
-                <br/>= peer's country (ISO → HSL hash). Same color = same country.
+                = log(degree). Larger = referenced by more peers.
+                Degree is how many edges touch this peer.
+              </div>
+
+              <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
+                <span style={{ display: "inline-block", width: 12, height: 12, borderRadius: "50%", background: "hsl(20 62% 55%)" }} />
+                <span style={{ display: "inline-block", width: 12, height: 12, borderRadius: "50%", background: "hsl(110 62% 55%)" }} />
+                <span style={{ display: "inline-block", width: 12, height: 12, borderRadius: "50%", background: "hsl(260 62% 55%)" }} />
+                <b style={{ color: "#8fc0ff", marginLeft: 4 }}>color</b>
               </div>
               <div style={{ color: "#a0a8b0", marginBottom: 8 }}>
-                <b style={{ color: "#8fc0ff" }}>line</b>
-                <br/>A → B = A returned B in a find_node response.
+                = peer's country (ISO → HSL hash). Same color = same country.
+                Grey-ish = GeoIP miss.
               </div>
+
+              <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
+                <svg width="32" height="10"><line x1="0" y1="5" x2="32" y2="5"
+                  stroke="rgba(160,195,235,.6)" strokeWidth="1"/></svg>
+                <b style={{ color: "#8fc0ff", marginLeft: 4 }}>line</b>
+              </div>
+              <div style={{ color: "#a0a8b0", marginBottom: 8 }}>
+                A → B means A returned B in a find_node response
+                (B is in A's routing table).
+              </div>
+
+              <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
+                <svg width="32" height="10"><line x1="0" y1="5" x2="32" y2="5"
+                  stroke="rgba(255,220,120,.95)" strokeWidth="1.6"/></svg>
+                <b style={{ color: "#8fc0ff", marginLeft: 4 }}>amber</b>
+              </div>
+              <div style={{ color: "#a0a8b0", marginBottom: 8 }}>
+                hover/drag a bubble → its edges light up
+                to show that peer's neighbors.
+              </div>
+
+              <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
+                <svg width="20" height="16">
+                  <circle cx="10" cy="8" r="6" fill="hsl(210 62% 55%)"
+                          stroke="rgba(255,90,120,.95)" strokeWidth="1.5"
+                          strokeDasharray="3,2"/>
+                </svg>
+                <b style={{ color: "#ff9bb5", marginLeft: 4 }}>red ring</b>
+              </div>
+              <div style={{ color: "#a0a8b0", marginBottom: 8 }}>
+                likely crawler: never kept by others (as_dst=0)
+                AND answered us 50+ times, or ≥3 source ports
+                from one IP.
+              </div>
+
               <div style={{ color: "#8fc0ff", fontSize: 10, letterSpacing: 0.5,
                              marginTop: 8, textTransform: "uppercase" }}>controls</div>
               <div style={{ color: "#a0a8b0" }}>
-                drag = pan · scroll = zoom · fit button = reset
+                drag bubble = pin · drag bg = pan · scroll = zoom
               </div>
+
               <div style={{ color: "#8892a0", marginTop: 8, fontSize: 10,
                              borderTop: "1px solid #232a31", paddingTop: 6 }}>
-                Powered by Cosmograph (WebGL). Layout runs on GPU; this
-                view scales smoothly to 100k+ nodes.
+                positions are emergent from a live force sim
+                (repulsion + edge springs + gravity). clusters mean
+                peers that reference each other.
               </div>
             </div>
           )}
