@@ -30,7 +30,8 @@ enum {
 };
 
 struct cand {
-    struct sockaddr_in peer;
+    struct sockaddr_storage peer;
+    socklen_t peerlen;
     uint8_t id[BEP44_NODE_ID_LEN];
     uint8_t has_id;
     uint8_t state;
@@ -38,6 +39,7 @@ struct cand {
 
 struct worker {
     int          in_use;
+    int          family;              /* AF_INET or AF_INET6 */
     uint8_t      target[BEP44_NODE_ID_LEN];
     struct cand  sl[CRAWL_SHORTLIST];
     int          sl_count;
@@ -65,37 +67,57 @@ static int           g_enabled       = 0;
 #define RECENT_COOLDOWN_S    30
 
 struct recent_entry {
-    struct sockaddr_in peer;
+    struct sockaddr_storage peer;
+    socklen_t          peerlen;
     time_t             ts;
     int                in_use;
 };
 static struct recent_entry g_recent[RECENT_CAP];
 static int                 g_recent_next = 0;      /* FIFO index */
 
+/* Family-aware equality, copy of the one in dht_wrap. */
 static int
-recent_is_hot(const struct sockaddr_in *p)
+sa_eq_generic(const struct sockaddr *a, const struct sockaddr *b)
+{
+    if (a->sa_family != b->sa_family) return 0;
+    if (a->sa_family == AF_INET) {
+        const struct sockaddr_in *x = (const struct sockaddr_in *)a;
+        const struct sockaddr_in *y = (const struct sockaddr_in *)b;
+        return x->sin_addr.s_addr == y->sin_addr.s_addr
+            && x->sin_port        == y->sin_port;
+    }
+    if (a->sa_family == AF_INET6) {
+        const struct sockaddr_in6 *x = (const struct sockaddr_in6 *)a;
+        const struct sockaddr_in6 *y = (const struct sockaddr_in6 *)b;
+        return x->sin6_port == y->sin6_port
+            && memcmp(&x->sin6_addr, &y->sin6_addr, sizeof(x->sin6_addr)) == 0;
+    }
+    return 0;
+}
+
+static int
+recent_is_hot(const struct sockaddr *p)
 {
     time_t cutoff = time(NULL) - RECENT_COOLDOWN_S;
     for (int i = 0; i < RECENT_CAP; i++) {
         const struct recent_entry *r = &g_recent[i];
         if (!r->in_use) continue;
         if (r->ts < cutoff) continue;
-        if (r->peer.sin_addr.s_addr == p->sin_addr.s_addr
-            && r->peer.sin_port     == p->sin_port) {
-            return 1;
-        }
+        if (sa_eq_generic((const struct sockaddr *)&r->peer, p)) return 1;
     }
     return 0;
 }
 
 static void
-recent_mark(const struct sockaddr_in *p)
+recent_mark(const struct sockaddr *p, socklen_t peerlen)
 {
+    if (peerlen > (socklen_t)sizeof(struct sockaddr_storage)) return;
     int i = g_recent_next;
-    g_recent[i].peer   = *p;
-    g_recent[i].ts     = time(NULL);
-    g_recent[i].in_use = 1;
-    g_recent_next      = (i + 1) % RECENT_CAP;
+    memcpy(&g_recent[i].peer, p, peerlen);
+    g_recent[i].peerlen = peerlen;
+    g_recent[i].ts      = time(NULL);
+    g_recent[i].in_use  = 1;
+    g_recent_next = (i + 1) % RECENT_CAP;
 }
 
 /* ============================================================
@@ -118,21 +140,19 @@ xor_cmp(const struct cand *a, const struct cand *b, const uint8_t *target)
     return 0;
 }
 
-static int
-sa_eq(const struct sockaddr_in *a, const struct sockaddr_in *b)
-{
-    return a->sin_addr.s_addr == b->sin_addr.s_addr
-        && a->sin_port        == b->sin_port;
-}
-
 /* Insert-or-upgrade a candidate. Returns the final index, or -1 if full.
- * Dedupe by peer address; upgrade id if we just learned one. */
+ * Dedupe by peer address; upgrade id if we just learned one. Only accepts
+ * peers matching the worker's family (v6 worker ignores v4 candidates and
+ * vice versa). */
 static int
-sl_insert(struct worker *w, const struct sockaddr_in *peer,
+sl_insert(struct worker *w, const struct sockaddr *peer, socklen_t peerlen,
           const uint8_t *id_or_null)
 {
+    if (peer->sa_family != w->family) return -1;
+    if (peerlen > (socklen_t)sizeof(struct sockaddr_storage)) return -1;
+
     for (int i = 0; i < w->sl_count; i++) {
-        if (sa_eq(&w->sl[i].peer, peer)) {
+        if (sa_eq_generic((const struct sockaddr *)&w->sl[i].peer, peer)) {
             if (id_or_null && !w->sl[i].has_id) {
                 memcpy(w->sl[i].id, id_or_null, BEP44_NODE_ID_LEN);
                 w->sl[i].has_id = 1;
@@ -153,7 +173,8 @@ sl_insert(struct worker *w, const struct sockaddr_in *peer,
     if (w->sl_count >= CRAWL_SHORTLIST) return -1;
 
     struct cand c = {0};
-    c.peer = *peer;
+    memcpy(&c.peer, peer, peerlen);
+    c.peerlen = peerlen;
     c.state = CAND_FRESH;
     if (id_or_null) {
         memcpy(c.id, id_or_null, BEP44_NODE_ID_LEN);
@@ -180,7 +201,7 @@ pick_next_fresh(struct worker *w)
     /* First pass: prefer fresh candidates that aren't on cooldown. */
     for (int i = 0; i < w->sl_count; i++) {
         if (w->sl[i].state != CAND_FRESH) continue;
-        if (recent_is_hot(&w->sl[i].peer)) continue;
+        if (recent_is_hot((const struct sockaddr *)&w->sl[i].peer)) continue;
         return i;
     }
     /* Fallback: if every fresh candidate is on cooldown, use one anyway so
@@ -210,7 +231,7 @@ rand_target(uint8_t t[BEP44_NODE_ID_LEN])
 }
 
 /* Reset the worker for a new random target; re-seed shortlist from jech's
- * routing table. */
+ * routing table (the one that matches the worker's family). */
 static void
 worker_reseed(struct worker *w)
 {
@@ -219,10 +240,23 @@ worker_reseed(struct worker *w)
     w->hops = 0;
     w->inflight_idx = -1;
 
-    struct sockaddr_in seed[CRAWL_SHORTLIST];
-    uint8_t seed_ids[CRAWL_SHORTLIST][BEP44_NODE_ID_LEN];
-    int n = dht_wrap_closest_to(w->target, seed, seed_ids, CRAWL_SHORTLIST);
-    for (int i = 0; i < n; i++) sl_insert(w, &seed[i], seed_ids[i]);
+    if (w->family == AF_INET) {
+        struct sockaddr_in seed[CRAWL_SHORTLIST];
+        uint8_t seed_ids[CRAWL_SHORTLIST][BEP44_NODE_ID_LEN];
+        int n = dht_wrap_closest_to(w->target, seed, seed_ids, CRAWL_SHORTLIST);
+        for (int i = 0; i < n; i++) {
+            sl_insert(w, (const struct sockaddr *)&seed[i], sizeof(seed[i]),
+                      seed_ids[i]);
+        }
+    } else {
+        struct sockaddr_in6 seed[CRAWL_SHORTLIST];
+        uint8_t seed_ids[CRAWL_SHORTLIST][BEP44_NODE_ID_LEN];
+        int n = dht_wrap_closest6_to(w->target, seed, seed_ids, CRAWL_SHORTLIST);
+        for (int i = 0; i < n; i++) {
+            sl_insert(w, (const struct sockaddr *)&seed[i], sizeof(seed[i]),
+                      seed_ids[i]);
+        }
+    }
 }
 
 /* ============================================================
@@ -257,25 +291,26 @@ ingest_compact_nodes(struct worker *w, const struct sockaddr *responder,
                      socklen_t responderlen,
                      const uint8_t *b, size_t n)
 {
-    /* Each record is 26 bytes: 20 id + 4 ip + 2 port (both network order).
-     * Worker shortlist is v4-only (crawler walks v4); v6 ingest is handled
-     * separately below. Edges are recorded for both families. */
+    /* 26-byte records: 20 id + 4 ip + 2 port. Goes into the v4 worker's
+     * shortlist (rejected by sl_insert for a v6 worker); always records
+     * responder→neighbour edges regardless of the worker's family. */
     for (size_t i = 0; i + 26 <= n; i += 26) {
         struct sockaddr_in sa;
         memset(&sa, 0, sizeof(sa));
         sa.sin_family = AF_INET;
         memcpy(&sa.sin_addr.s_addr, b + i + 20, 4);
         memcpy(&sa.sin_port,        b + i + 24, 2);
-        sl_insert(w, &sa, b + i);
+        sl_insert(w, (const struct sockaddr *)&sa, sizeof(sa), b + i);
         if (responder) db_upsert_edge(responder, responderlen,
                                       (const struct sockaddr *)&sa, sizeof(sa));
     }
 }
 
-/* Parse 38-byte compact-nodes6 records and record edges only. v6 neighbours
- * don't enter the v4-only shortlist. */
+/* 38-byte compact6 records: 20 id + 16 ip + 2 port. Enters the shortlist
+ * only on v6 workers; always records edges. */
 static void
-ingest_compact_nodes6(const struct sockaddr *responder, socklen_t responderlen,
+ingest_compact_nodes6(struct worker *w, const struct sockaddr *responder,
+                      socklen_t responderlen,
                       const uint8_t *b, size_t n)
 {
     for (size_t i = 0; i + 38 <= n; i += 38) {
@@ -284,6 +319,7 @@ ingest_compact_nodes6(const struct sockaddr *responder, socklen_t responderlen,
         sa.sin6_family = AF_INET6;
         memcpy(&sa.sin6_addr, b + i + 20, 16);
         memcpy(&sa.sin6_port, b + i + 36,  2);
+        sl_insert(w, (const struct sockaddr *)&sa, sizeof(sa), b + i);
         if (responder) db_upsert_edge(responder, responderlen,
                                       (const struct sockaddr *)&sa, sizeof(sa));
     }
@@ -343,7 +379,7 @@ on_tx(bep44_tx_event ev,
                              nodes->str.bytes, nodes->str.len);
     }
     if (nodes6 && nodes6->type == BENCODE_STR) {
-        ingest_compact_nodes6(peer, (socklen_t)peerlen,
+        ingest_compact_nodes6(w, peer, (socklen_t)peerlen,
                               nodes6->str.bytes, nodes6->str.len);
     }
 }
@@ -381,7 +417,7 @@ worker_send_probe(struct worker *w)
     if (plen < 0) return;
 
     if (dht_wrap_send_query((const struct sockaddr *)&c->peer,
-                            (int)sizeof(c->peer),
+                            (int)c->peerlen,
                             pkt, (size_t)plen,
                             tid, sizeof(tid),
                             CRAWL_TX_TIMEOUT_MS,
@@ -395,7 +431,7 @@ worker_send_probe(struct worker *w)
     w->in_flight = 1;
     w->hops++;
     g_pkts_this_sec++;
-    recent_mark(&c->peer);
+    recent_mark((const struct sockaddr *)&c->peer, c->peerlen);
 }
 
 /* ============================================================
@@ -412,17 +448,28 @@ crawl_start(int workers, int max_pkts_per_sec)
     g_worker_n = workers;
     g_pkts_cap = max_pkts_per_sec;
     memset(g_workers, 0, sizeof(g_workers));
+
+    /* Assign families round-robin. If only 1 worker requested, it's v4;
+     * otherwise 1/4 of workers walk v6 (v6 peer population is smaller so
+     * we don't need to match v4's parallelism). Workers on an unsupported
+     * family degrade gracefully: worker_reseed returns an empty shortlist
+     * when jech's v6 table is empty, and pick_next_fresh returns -1, so
+     * the worker just idles until v6 peers show up. */
+    int v6_enabled = dht_wrap_socket6() >= 0;
     for (int i = 0; i < g_worker_n; i++) {
         g_workers[i].in_use = 1;
         g_workers[i].max_hops = 16;
         g_workers[i].inflight_idx = -1;
-        /* rand_target + seed happens on first tick via worker_reseed, because
-         * jech's routing table may still be empty at crawl_start time. */
+        g_workers[i].family = (v6_enabled && g_worker_n > 1 && (i % 4) == 3)
+                              ? AF_INET6 : AF_INET;
         rand_target(g_workers[i].target);
     }
+    int v6_n = 0;
+    for (int i = 0; i < g_worker_n; i++)
+        if (g_workers[i].family == AF_INET6) v6_n++;
     g_enabled = 1;
-    fprintf(stderr, TAG "started %d workers, cap %d pkts/s\n",
-            g_worker_n, g_pkts_cap);
+    fprintf(stderr, TAG "started %d workers (v4=%d v6=%d), cap %d pkts/s\n",
+            g_worker_n, g_worker_n - v6_n, v6_n, g_pkts_cap);
     return 0;
 }
 
