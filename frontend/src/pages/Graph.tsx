@@ -51,7 +51,6 @@ export default function Graph() {
 
   const [limit, setLimit] = useState(1000);
   const [loading, setLoading] = useState(false);
-  const [phase, setPhase] = useState<"fetching" | "settling" | "ready">("fetching");
   const [data, setData]   = useState<{ nodes: Node[]; links: Link[] }>({ nodes: [], links: [] });
   const [counts, setCounts] = useState<{ nodes: number; links: number } | null>(null);
   const [showLegend, setShowLegend] = useState(true);
@@ -61,7 +60,6 @@ export default function Graph() {
 
   const load = async () => {
     setLoading(true);
-    setPhase("fetching");
     try {
       const r = await fetch(`/api/graph?limit=${limit}`);
       const g = await r.json();
@@ -71,10 +69,7 @@ export default function Graph() {
         .filter((e: Link) => e.source !== e.target);
       setData({ nodes, links });
       setCounts({ nodes: nodes.length, links: links.length });
-      setPhase(nodes.length > 0 ? "settling" : "ready");
-    } catch (e) {
-      setPhase("ready");
-    }
+    } catch (e) { /* ignore */ }
     setLoading(false);
   };
 
@@ -191,10 +186,9 @@ export default function Graph() {
           warmupTicks={50}
           cooldownTicks={200}        /* stop simulation after N ticks */
           onNodeHover={onNodeHover as any}
-          onEngineStop={() => setPhase("ready")}
         />
 
-        {phase !== "ready" && (
+        {loading && (
           <div style={{
             position: "absolute", inset: 0,
             display: "flex", alignItems: "center", justifyContent: "center",
@@ -210,9 +204,7 @@ export default function Graph() {
               color: "#d8dee6", fontSize: 13,
             }}>
               <span className="graph-spinner" />
-              {phase === "fetching"
-                ? "fetching graph…"
-                : `running force simulation (${(counts?.nodes ?? 0).toLocaleString()} nodes · ${(counts?.links ?? 0).toLocaleString()} edges)…`}
+              loading graph…
             </div>
           </div>
         )}
