@@ -9,14 +9,25 @@ via miniupnpc.
 
 ## Branches
 
-This repo has two long-lived branches with deliberately different scope:
+This repo has three long-lived branches with deliberately different scope:
 
 - **`main`** (this branch) — the lean BEP 44 implementation. A single C
   binary that runs as a daemon and a thin CLI to put/get mutable +
   immutable items. No SQLite, no web server, no observation pipeline.
   Dependencies stay small: libsodium, OpenSSL, miniupnpc, libjansson.
-  Intended for embedding, scripts, and other tools that just need a
-  reliable BEP 44 client. **Read on for usage.**
+  Intended for scripts and operators who want a reliable BEP 44 client
+  on the command line. **Read on for usage.**
+
+- **`libbep44`** — the same DHT/BEP 44 internals exposed as an
+  embeddable C library (`libbep44.a` + `include/libbep44.h`). The
+  daemon, CLI, IPC, and UPnP layers are dropped; what's left is a
+  small async API: `bep44_open` / `bep44_step` for the event loop,
+  plus `keygen`, `put_mutable`/`put_immutable`, `get_mutable`/
+  `get_immutable`, and `target_*` derivations. Use this when you want
+  to publish/retrieve BEP 44 items from inside a larger C program
+  without spawning a daemon. See the per-function API reference and
+  copy-pastable examples in that branch's `README.md`:
+  `git switch libbep44`.
 
 - **`crawler`** — active development branch. Adds, on top of the main
   daemon: an active DHT crawler (find_node + BEP 51 sample_infohashes),
