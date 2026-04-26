@@ -14,6 +14,7 @@
 #include <time.h>
 
 #include "db.h"
+#include "dht_wrap.h"
 
 #define TAG "[dht44:web] "
 
@@ -805,8 +806,9 @@ dispatch_http(struct lws *wsi)
     }
     if (strcmp(uri, "/api/graph") == 0) {
         char *body = db_select_graph_json(limit);
-        /* Enrich each node with country ISO (if GeoIP loaded). */
-        if (body && g_city_ok) {
+        /* Enrich each node with the same geo + classifier the Peers tab gets,
+         * so the graph view's color/click/filter UI can use one vocabulary. */
+        if (body) {
             json_error_t err;
             json_t *env = json_loads(body, 0, &err);
             free(body);
@@ -816,13 +818,16 @@ dispatch_http(struct lws *wsi)
                 size_t i; json_t *n;
                 json_array_foreach(nodes, i, n) {
                     const char *ip = json_string_value(json_object_get(n, "ip"));
-                    if (!ip) continue;
-                    json_t *geo = geoip_lookup(ip);
+                    json_t *geo = ip ? geoip_lookup(ip) : NULL;
                     if (geo) {
+                        /* Mirror the legacy "country" top-level key that the
+                         * graph endpoint used to emit, so older frontends keep
+                         * working alongside the richer `geo` object. */
                         const char *c = json_string_value(json_object_get(geo, "country"));
                         if (c) json_object_set_new(n, "country", json_string(c));
-                        json_decref(geo);
+                        json_object_set_new(n, "geo", geo);
                     }
+                    classify_peer(n, geo);
                 }
                 body = json_dumps(env, JSON_COMPACT);
                 json_decref(env);
@@ -831,6 +836,19 @@ dispatch_http(struct lws *wsi)
         int rc = send_json_response(wsi, body ? body : "{\"nodes\":[],\"links\":[]}");
         free(body);
         return rc;
+    }
+    if (strcmp(uri, "/api/node-id") == 0) {
+        const uint8_t *id = dht_wrap_node_id();
+        char hex[41];
+        if (id) {
+            for (int i = 0; i < 20; i++)
+                snprintf(&hex[i * 2], 3, "%02x", id[i]);
+        } else {
+            hex[0] = 0;
+        }
+        char body[80];
+        snprintf(body, sizeof(body), "{\"node_id\":\"%s\"}", hex);
+        return send_json_response(wsi, body);
     }
 
     return lws_return_http_status(wsi, 404, NULL);

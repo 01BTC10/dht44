@@ -803,7 +803,15 @@ db_select_graph_json(int limit)
         int     keep;            /* set if this candidate makes the final cut */
         const void *v;            /* pointer into the row's blob — copied later */
         int     v_len;
+        const void *node_id;      /* 20-byte blob copied here from peers row */
+        int     node_id_len;
         int64_t as_src, as_dst, same_ip;
+        int64_t first_seen, last_seen;
+        int64_t queries_in, queries_out;
+        int     ro;               /* -1 = NULL */
+        int     bep42_ok;         /* -1 = NULL */
+        int     rtt_ms_ewma;      /* -1 = NULL */
+        int     supports_bep51;   /* -1 = NULL */
         json_t *node_json;        /* allocated lazily on keep */
     } cand_t;
 
@@ -826,7 +834,10 @@ db_select_graph_json(int limit)
         "        p.v_string,"
         "        COALESCE(src.c,0) AS as_src,"
         "        COALESCE(dst.c,0) AS as_dst,"
-        "        COALESCE(ipc.c,0) AS same_ip"
+        "        COALESCE(ipc.c,0) AS same_ip,"
+        "        p.node_id, p.first_seen, p.last_seen,"
+        "        p.queries_in, p.queries_out,"
+        "        p.ro, p.bep42_ok, p.rtt_ms_ewma, p.supports_bep51"
         "   FROM all_nodes a"
         "   LEFT JOIN src  ON src.ip=a.ip  AND src.port=a.port"
         "   LEFT JOIN dst  ON dst.ip=a.ip  AND dst.port=a.port"
@@ -854,6 +865,20 @@ db_select_graph_json(int limit)
         c->as_src  = sqlite3_column_int64(s, 4);
         c->as_dst  = sqlite3_column_int64(s, 5);
         c->same_ip = sqlite3_column_int64(s, 6);
+        const void *nid = sqlite3_column_blob(s, 7);
+        int nidl = sqlite3_column_bytes(s, 7);
+        if (nid && nidl > 0) {
+            void *copy = malloc((size_t)nidl);
+            if (copy) { memcpy(copy, nid, (size_t)nidl); c->node_id = copy; c->node_id_len = nidl; }
+        }
+        c->first_seen     = sqlite3_column_int64(s, 8);
+        c->last_seen      = sqlite3_column_int64(s, 9);
+        c->queries_in     = sqlite3_column_int64(s, 10);
+        c->queries_out    = sqlite3_column_int64(s, 11);
+        c->ro             = (sqlite3_column_type(s, 12) == SQLITE_NULL) ? -1 : sqlite3_column_int(s, 12);
+        c->bep42_ok       = (sqlite3_column_type(s, 13) == SQLITE_NULL) ? -1 : sqlite3_column_int(s, 13);
+        c->rtt_ms_ewma    = (sqlite3_column_type(s, 14) == SQLITE_NULL) ? -1 : sqlite3_column_int(s, 14);
+        c->supports_bep51 = (sqlite3_column_type(s, 15) == SQLITE_NULL) ? -1 : sqlite3_column_int(s, 15);
     }
     sqlite3_finalize(s);
 
@@ -927,9 +952,24 @@ db_select_graph_json(int limit)
         /* "deg" reports the in-result degree — what the user actually sees. */
         json_object_set_new(o, "deg",  json_integer(cands[i].internal_deg));
         json_set_blob_hex(o, "v_string", cands[i].v, cands[i].v_len);
+        json_set_blob_hex(o, "node_id",  cands[i].node_id, cands[i].node_id_len);
         json_object_set_new(o, "as_src",  json_integer(cands[i].as_src));
         json_object_set_new(o, "as_dst",  json_integer(cands[i].as_dst));
         json_object_set_new(o, "same_ip", json_integer(cands[i].same_ip));
+        json_object_set_new(o, "first_seen",  json_integer(cands[i].first_seen));
+        json_object_set_new(o, "last_seen",   json_integer(cands[i].last_seen));
+        json_object_set_new(o, "queries_in",  json_integer(cands[i].queries_in));
+        json_object_set_new(o, "queries_out", json_integer(cands[i].queries_out));
+        json_object_set_new(o, "ro",
+            cands[i].ro       < 0 ? json_null() : json_integer(cands[i].ro));
+        json_object_set_new(o, "bep42_ok",
+            cands[i].bep42_ok < 0 ? json_null() : json_integer(cands[i].bep42_ok));
+        json_object_set_new(o, "rtt_ms",
+            cands[i].rtt_ms_ewma < 0 ? json_null() : json_integer(cands[i].rtt_ms_ewma));
+        json_object_set_new(o, "supports_bep51",
+            cands[i].supports_bep51 < 0 ? json_null() : json_integer(cands[i].supports_bep51));
+        /* Legacy single-bit; the http_ws layer overlays the full classifier
+         * (crawler_class/score/signals/reason) on top after geoip enrichment. */
         int crawler = (cands[i].as_dst == 0 && cands[i].as_src >= 50)
                    || cands[i].same_ip >= 3;
         json_object_set_new(o, "likely_crawler", json_integer(crawler ? 1 : 0));
@@ -964,9 +1004,10 @@ db_select_graph_json(int limit)
 
     cand_index_free(&ix);
 
-    /* Free per-candidate v_string copies. */
+    /* Free per-candidate v_string + node_id copies. */
     for (int i = 0; i < cand_n; i++) {
         if (cands[i].v) free((void *)cands[i].v);
+        if (cands[i].node_id) free((void *)cands[i].node_id);
     }
     free(cands);
 
