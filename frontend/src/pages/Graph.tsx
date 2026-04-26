@@ -63,12 +63,52 @@ function hashHsl(s: string, sat = 62, light = 60): string {
 
 /* Color preference: ASN org > country > neutral grey. ASN groups hosting
  * clusters (Hetzner / OVH / Contabo) into one visible blob. */
-function colorFor(node: Node): string {
+function colorByAsn(node: Node): string {
   const org = node.geo?.asn_org;
   if (org && org.length > 0) return hashHsl(org);
   const iso = node.country;
   if (iso && iso.length === 2) return hashHsl(iso, 50, 55);
   return "hsl(210, 10%, 60%)";
+}
+
+/* Highest-bit-of-XOR-distance bucket index. node_id and ours are 40-hex
+ * strings (20 bytes). Returns 0..159 (0 = identical-up-to-this-bit, 159 =
+ * differ in topmost bit), or null if either id is missing/invalid. */
+function kbucket(node_id: string | null | undefined, ours: string | null): number | null {
+  if (!node_id || !ours) return null;
+  if (node_id.length < 40 || ours.length < 40) return null;
+  for (let i = 0; i < 20; i++) {
+    const a = parseInt(node_id.substr(i * 2, 2), 16);
+    const b = parseInt(ours.substr(i * 2, 2), 16);
+    const x = a ^ b;
+    if (x === 0) continue;
+    /* Highest set bit position 7..0 within this byte. */
+    let bit = 7;
+    while (bit > 0 && (x & (1 << bit)) === 0) bit--;
+    return 159 - (i * 8 + (7 - bit));
+  }
+  return 0;     /* identical */
+}
+
+/* Color by k-bucket index. 0 = closest (red end), 159 = farthest (cyan end). */
+function colorByBucket(node: Node, ours: string | null): string {
+  const b = kbucket(node.node_id, ours);
+  if (b == null) return "hsl(210, 10%, 60%)";
+  /* Spread the visible range over the buckets that actually populate. */
+  const hue = ((159 - b) * 2.25) % 360;
+  return `hsl(${hue.toFixed(0)}, 70%, 55%)`;
+}
+
+/* /24 (IPv4) or /48 (IPv6) network prefix — used for sybil-cluster
+ * highlighting when a node is selected. */
+function netPrefix(ip: string): string {
+  if (ip.includes(":")) {
+    /* /48 — first three hextet groups */
+    const parts = ip.split(":");
+    return parts.slice(0, 3).join(":");
+  }
+  const parts = ip.split(".");
+  return parts.slice(0, 3).join(".");
 }
 
 function escHTML(s: string | null | undefined): string {
@@ -102,6 +142,15 @@ export default function Graph() {
   const [bep51Only,   setBep51Only]   = useState(false);
   const [search, setSearch]   = useState("");
   const [hilite, setHilite] = useState<Set<string>>(new Set());
+  const [colorMode, setColorMode] = useState<"asn" | "kbucket">("asn");
+  const [ourNodeId, setOurNodeId] = useState<string | null>(null);
+
+  /* Fetch our daemon's node_id once; used by the k-bucket coloring mode. */
+  useEffect(() => {
+    fetch("/api/node-id").then(r => r.json())
+      .then(j => setOurNodeId((j.node_id ?? "").toLowerCase() || null))
+      .catch(() => {});
+  }, []);
 
   /* Track viewport size so the graph re-fits the container. */
   const [size, setSize] = useState<{ w: number; h: number }>({ w: 800, h: 600 });
@@ -137,6 +186,23 @@ export default function Graph() {
     });
     return { nodes, links };
   }, [data, aliveFilter, familyFilter, classFilter, bep51Only]);
+
+  /* Sybil cluster: when a node is selected, highlight others sharing its
+   * /24 (or /48 for v6) AND/OR its ASN. Two indicators of the same hosting
+   * presence — clusters jump out instantly when you click a candidate. */
+  const siblings = useMemo(() => {
+    if (!selected) return new Set<string>();
+    const net  = netPrefix(selected.ip);
+    const asn  = selected.geo?.asn;
+    const out  = new Set<string>();
+    for (const n of displayed.nodes) {
+      if (n.id === selected.id) continue;
+      const sameNet = netPrefix(n.ip) === net;
+      const sameAsn = asn != null && n.geo?.asn === asn;
+      if (sameNet || sameAsn) out.add(n.id);
+    }
+    return out;
+  }, [selected, displayed.nodes]);
 
   const clearSettleTimer = () => {
     if (settleTimer.current != null) {
@@ -315,7 +381,9 @@ export default function Graph() {
             <option value={500}>500</option>
             <option value={1000}>1,000</option>
             <option value={2500}>2,500</option>
-            <option value={5000}>5,000 (max)</option>
+            <option value={5000}>5,000</option>
+            <option value={10000}>10,000</option>
+            <option value={25000}>25,000 (max — heavy)</option>
           </select>
         </label>
         <button style={{ marginLeft: 6 }} onClick={load} disabled={busy}>
@@ -353,6 +421,14 @@ export default function Graph() {
         <Chip active={classFilter.has("monitor")}  color="#8a6a2e" onClick={() => toggleClass("monitor")}>monitor</Chip>
         <Chip active={classFilter.has("honeypot")} color="#8a2e2e" onClick={() => toggleClass("honeypot")}>honeypot</Chip>
         <Chip active={bep51Only} onClick={() => setBep51Only(b => !b)}>BEP 51 only</Chip>
+        <span style={{ marginLeft: 6, fontSize: 10, color: "#8892a0" }}>color:</span>
+        <Chip active={colorMode === "asn"}
+              onClick={() => setColorMode("asn")}>ASN</Chip>
+        <Chip active={colorMode === "kbucket"}
+              onClick={() => setColorMode("kbucket")}
+              color={ourNodeId ? "#3a4a6a" : "#3a3a3a"}>
+          k-bucket{!ourNodeId && " (no id)"}
+        </Chip>
         <span className="small" style={{ marginLeft: 8 }}>
           {counts
             ? `${displayed.nodes.length.toLocaleString()} / ${counts.nodes.toLocaleString()} nodes · ${displayed.links.length.toLocaleString()} / ${counts.links.toLocaleString()} edges`
@@ -373,7 +449,14 @@ export default function Graph() {
           graphData={displayed}
           nodeId="id"
           nodeVal={(n: any) => Math.max(1, Math.sqrt(n.deg || 1) * 1.4)}
-          nodeColor={(n: any) => hilite.has(n.id) ? "#ffeb3b" : colorFor(n)}
+          nodeColor={(n: any) => {
+            if (n.id === selected?.id) return "#ffffff";
+            if (hilite.has(n.id))      return "#ffeb3b";
+            if (siblings.has(n.id))    return "#ff7ad9";
+            return colorMode === "kbucket"
+              ? colorByBucket(n, ourNodeId)
+              : colorByAsn(n);
+          }}
           nodeOpacity={0.95}
           nodeResolution={8}        /* sphere segments — lower = faster */
           linkColor={() => "rgba(160,195,235,0.6)"}
@@ -448,8 +531,19 @@ export default function Graph() {
               </div>
               <div style={{ color: "#a0a8b0", marginBottom: 8 }}>
                 <b style={{ color: "#8fc0ff" }}>color</b>
-                <br/>= peer's ASN org (hosting cluster).
-                Falls back to country, then grey.
+                <br/>ASN mode: hosting cluster (Hetzner / OVH /
+                Constant Co. each one color).
+                <br/>k-bucket mode: XOR distance from our node id —
+                close peers same color (rare), most cluster in the
+                far buckets.
+              </div>
+              <div style={{ color: "#a0a8b0", marginBottom: 8 }}>
+                <b style={{ color: "#ffffff" }}>white</b>
+                <br/>= currently selected node.
+              </div>
+              <div style={{ color: "#a0a8b0", marginBottom: 8 }}>
+                <b style={{ color: "#ff7ad9" }}>pink</b>
+                <br/>= shares /24 or ASN with selected (sybil cluster).
               </div>
               <div style={{ color: "#a0a8b0", marginBottom: 8 }}>
                 <b style={{ color: "#ffeb3b" }}>yellow</b>
@@ -457,7 +551,8 @@ export default function Graph() {
               </div>
               <div style={{ color: "#a0a8b0", marginBottom: 8 }}>
                 <b style={{ color: "#8fc0ff" }}>click a node</b>
-                <br/>= open detail panel (Esc closes).
+                <br/>= open detail panel + cluster highlight
+                (Esc closes).
               </div>
               <div style={{ color: "#a0a8b0", marginBottom: 8 }}>
                 <b style={{ color: "#8fc0ff" }}>line</b>
