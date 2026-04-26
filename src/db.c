@@ -5,6 +5,7 @@
 #include <errno.h>
 #include <jansson.h>
 #include <sqlite3.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -682,6 +683,91 @@ db_prune_peers_older_than(int64_t older_than_ts)
     return n;
 }
 
+/* Open-addressing hash index from "ip:port" string → candidate index.
+ *
+ * The graph builder used to do a linear scan over `cand_n` candidates for
+ * every edge in the table — at 885 k edges × 15 k candidates that is many
+ * billions of strcmp ops and dominated the request time. With a hash lookup
+ * each edge resolves in O(1) and the dominant cost falls back to the SQL
+ * pass that emits the candidate set. */
+typedef struct {
+    int     *slots;     /* -1 sentinel = empty; >=0 = index into cands[] */
+    uint32_t cap_mask;  /* power-of-two minus one */
+    /* parallel arrays sized cand_n: precomputed key + hash to avoid
+     * re-snprintf'ing on every probe step */
+    char    (*keys)[INET_ADDRSTRLEN + 8];
+    uint8_t  *key_lens;
+    uint32_t *hashes;
+} cand_index;
+
+static uint32_t
+fnv1a(const char *p, int len)
+{
+    uint32_t h = 2166136261u;
+    for (int i = 0; i < len; i++) {
+        h ^= (unsigned char)p[i];
+        h *= 16777619u;
+    }
+    return h;
+}
+
+static int
+cand_index_build(cand_index *ix, int n,
+                 const char (*ips)[INET_ADDRSTRLEN], const int *ports)
+{
+    memset(ix, 0, sizeof(*ix));
+    if (n <= 0) return 0;
+    /* 50% target load */
+    uint32_t cap = 16;
+    while (cap < (uint32_t)n * 2) cap <<= 1;
+    ix->slots    = malloc((size_t)cap * sizeof(int));
+    ix->keys     = malloc((size_t)n * sizeof(*ix->keys));
+    ix->key_lens = malloc((size_t)n);
+    ix->hashes   = malloc((size_t)n * sizeof(uint32_t));
+    if (!ix->slots || !ix->keys || !ix->key_lens || !ix->hashes) {
+        free(ix->slots); free(ix->keys); free(ix->key_lens); free(ix->hashes);
+        memset(ix, 0, sizeof(*ix));
+        return -1;
+    }
+    ix->cap_mask = cap - 1;
+    for (uint32_t s = 0; s < cap; s++) ix->slots[s] = -1;
+    for (int i = 0; i < n; i++) {
+        int kl = snprintf(ix->keys[i], sizeof(ix->keys[i]),
+                          "%s:%d", ips[i], ports[i]);
+        ix->key_lens[i] = (uint8_t)(kl > 255 ? 255 : kl);
+        ix->hashes[i]   = fnv1a(ix->keys[i], kl);
+        uint32_t slot = ix->hashes[i] & ix->cap_mask;
+        while (ix->slots[slot] != -1) slot = (slot + 1) & ix->cap_mask;
+        ix->slots[slot] = i;
+    }
+    return 0;
+}
+
+static void
+cand_index_free(cand_index *ix)
+{
+    free(ix->slots); free(ix->keys); free(ix->key_lens); free(ix->hashes);
+    memset(ix, 0, sizeof(*ix));
+}
+
+static int
+cand_index_lookup(const cand_index *ix, const char *ip, int port)
+{
+    if (!ix->slots || !ip) return -1;
+    char     key[INET_ADDRSTRLEN + 8];
+    int      kl = snprintf(key, sizeof(key), "%s:%d", ip, port);
+    uint32_t h  = fnv1a(key, kl);
+    uint32_t slot = h & ix->cap_mask;
+    for (;;) {
+        int idx = ix->slots[slot];
+        if (idx < 0) return -1;
+        if (ix->hashes[idx] == h
+            && ix->key_lens[idx] == (uint8_t)kl
+            && memcmp(ix->keys[idx], key, (size_t)kl) == 0) return idx;
+        slot = (slot + 1) & ix->cap_mask;
+    }
+}
+
 /* Pull the top-N peers by edge degree and the subgraph of edges between them.
  * Response shape: { nodes: [...], links: [...] }. Node metadata (country is
  * NOT included here — GeoIP resolution happens in http_ws.c where the mmdb
@@ -772,6 +858,25 @@ db_select_graph_json(int limit)
     sqlite3_finalize(s);
 
     /* --- Pass 2: count internal-degree by walking edges ----------- */
+    /* Build a hash index over the candidate set. Without this, looking up
+     * each edge's endpoint becomes a linear scan over cand_n — at 800 k+
+     * edges and 15 k candidates that's billions of strcmps. */
+    cand_index ix;
+    {
+        char  (*ips)[INET_ADDRSTRLEN] = malloc((size_t)cand_n * sizeof(*ips));
+        int    *ports = malloc((size_t)cand_n * sizeof(int));
+        if (ips && ports) {
+            for (int i = 0; i < cand_n; i++) {
+                memcpy(ips[i], cands[i].ip, sizeof(ips[i]));
+                ports[i] = cands[i].port;
+            }
+            cand_index_build(&ix, cand_n, ips, ports);
+        } else {
+            memset(&ix, 0, sizeof(ix));
+        }
+        free(ips); free(ports);
+    }
+
     sqlite3_stmt *e = NULL;
     if (sqlite3_prepare_v2(g_db,
             "SELECT src_ip,src_port,dst_ip,dst_port FROM edges",
@@ -781,12 +886,8 @@ db_select_graph_json(int limit)
             int sport = sqlite3_column_int(e, 1);
             const char *dip = (const char *)sqlite3_column_text(e, 2);
             int dport = sqlite3_column_int(e, 3);
-            int si = -1, di = -1;
-            for (int i = 0; i < cand_n; i++) {
-                if (si < 0 && cands[i].port == sport && strcmp(cands[i].ip, sip)==0) si = i;
-                if (di < 0 && cands[i].port == dport && strcmp(cands[i].ip, dip)==0) di = i;
-                if (si >= 0 && di >= 0) break;
-            }
+            int si = cand_index_lookup(&ix, sip, sport);
+            int di = cand_index_lookup(&ix, dip, dport);
             if (si >= 0 && di >= 0) {
                 cands[si].internal_deg++;
                 cands[di].internal_deg++;
@@ -846,14 +947,9 @@ db_select_graph_json(int limit)
             int sport = sqlite3_column_int(e, 1);
             const char *dip = (const char *)sqlite3_column_text(e, 2);
             int dport = sqlite3_column_int(e, 3);
-            int si = -1, di = -1;
-            for (int i = 0; i < cand_n; i++) {
-                if (!cands[i].keep) continue;
-                if (si < 0 && cands[i].port == sport && strcmp(cands[i].ip, sip)==0) si = i;
-                if (di < 0 && cands[i].port == dport && strcmp(cands[i].ip, dip)==0) di = i;
-                if (si >= 0 && di >= 0) break;
-            }
-            if (si >= 0 && di >= 0) {
+            int si = cand_index_lookup(&ix, sip, sport);
+            int di = cand_index_lookup(&ix, dip, dport);
+            if (si >= 0 && di >= 0 && cands[si].keep && cands[di].keep) {
                 char sbuf[INET_ADDRSTRLEN+8], dbuf[INET_ADDRSTRLEN+8];
                 snprintf(sbuf, sizeof(sbuf), "%s:%d", cands[si].ip, cands[si].port);
                 snprintf(dbuf, sizeof(dbuf), "%s:%d", cands[di].ip, cands[di].port);
@@ -865,6 +961,8 @@ db_select_graph_json(int limit)
         }
         sqlite3_finalize(e);
     }
+
+    cand_index_free(&ix);
 
     /* Free per-candidate v_string copies. */
     for (int i = 0; i < cand_n; i++) {
