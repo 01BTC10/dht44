@@ -24,9 +24,9 @@ Built on the [`jech/dht`](https://github.com/jech/dht) Kademlia
 implementation (vendored at `vendor/jech-dht/`), with two small
 local patches documented in `vendor/jech-dht/PROVENANCE.md`.
 
-This branch is the **library distribution**. The
-[`main`](https://github.com/anthropics/bep44_dht/tree/main) branch is the
-upstream `dht44` CLI/daemon — same DHT internals, different shape.
+This branch is the **library distribution**. The `main` branch is
+the upstream `dht44` CLI/daemon — same DHT internals, different
+shape. `git switch main` for the daemon flavor.
 
 ## Contents
 
