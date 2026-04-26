@@ -5,13 +5,30 @@
 #include <stdint.h>
 #include <sys/types.h>
 
+#ifndef BEP44_PK_LEN
 #define BEP44_PK_LEN     32
+#endif
+#ifndef BEP44_SK_LEN
 #define BEP44_SK_LEN     64
+#endif
+#ifndef BEP44_SIG_LEN
 #define BEP44_SIG_LEN    64
+#endif
+#ifndef BEP44_TARGET_LEN
 #define BEP44_TARGET_LEN 20
+#endif
+#ifndef BEP44_NODE_ID_LEN
 #define BEP44_NODE_ID_LEN 20
+#endif
+#ifndef BEP44_MAX_SALT
 #define BEP44_MAX_SALT   64
+#endif
+#ifndef BEP44_MAX_V
 #define BEP44_MAX_V      1000
+#endif
+#ifndef BEP44_VALUE_MAX
+#define BEP44_VALUE_MAX  BEP44_MAX_V
+#endif
 
 /* SHA-1 hashes used by BEP 44.  All output buffers are 20 bytes. */
 
