@@ -50,7 +50,10 @@ export default function Graph() {
   const tipRef = useRef<HTMLDivElement>(null);
 
   const [limit, setLimit] = useState(1000);
-  const [loading, setLoading] = useState(false);
+  const [fetching, setFetching] = useState(false);
+  const [settling, setSettling] = useState(false);
+  const settleTimer = useRef<number | null>(null);
+  const busy = fetching || settling;
   const [data, setData]   = useState<{ nodes: Node[]; links: Link[] }>({ nodes: [], links: [] });
   const [counts, setCounts] = useState<{ nodes: number; links: number } | null>(null);
   const [showLegend, setShowLegend] = useState(true);
@@ -58,8 +61,17 @@ export default function Graph() {
   /* Track viewport size so the graph re-fits the container. */
   const [size, setSize] = useState<{ w: number; h: number }>({ w: 800, h: 600 });
 
+  const clearSettleTimer = () => {
+    if (settleTimer.current != null) {
+      window.clearTimeout(settleTimer.current);
+      settleTimer.current = null;
+    }
+  };
+
   const load = async () => {
-    setLoading(true);
+    clearSettleTimer();
+    setFetching(true);
+    setSettling(true);              /* assume there will be a settle phase */
     try {
       const r = await fetch(`/api/graph?limit=${limit}`);
       const g = await r.json();
@@ -69,8 +81,17 @@ export default function Graph() {
         .filter((e: Link) => e.source !== e.target);
       setData({ nodes, links });
       setCounts({ nodes: nodes.length, links: links.length });
-    } catch (e) { /* ignore */ }
-    setLoading(false);
+      if (nodes.length === 0) setSettling(false);
+      else {
+        /* Safety net — onEngineStop is the canonical signal but force-graph
+         * occasionally swallows it on rapid reloads. Drop the overlay after
+         * 30s no matter what so the page never appears stuck. */
+        settleTimer.current = window.setTimeout(() => setSettling(false), 30000);
+      }
+    } catch (e) {
+      setSettling(false);
+    }
+    setFetching(false);
   };
 
   useEffect(() => { load(); /* eslint-disable-next-line */ }, [limit]);
@@ -148,8 +169,8 @@ export default function Graph() {
             <option value={5000}>5,000 (max)</option>
           </select>
         </label>
-        <button style={{ marginLeft: 10 }} onClick={load} disabled={loading}>
-          {loading ? "loading…" : "reload"}
+        <button style={{ marginLeft: 10 }} onClick={load} disabled={busy}>
+          {busy ? "loading…" : "reload"}
         </button>
         <button style={{ marginLeft: 6 }}
                 onClick={() => fgRef.current?.zoomToFit(800)}>
@@ -186,9 +207,10 @@ export default function Graph() {
           warmupTicks={50}
           cooldownTicks={200}        /* stop simulation after N ticks */
           onNodeHover={onNodeHover as any}
+          onEngineStop={() => { clearSettleTimer(); setSettling(false); }}
         />
 
-        {loading && (
+        {busy && (
           <div style={{
             position: "absolute", inset: 0,
             display: "flex", alignItems: "center", justifyContent: "center",
@@ -204,7 +226,9 @@ export default function Graph() {
               color: "#d8dee6", fontSize: 13,
             }}>
               <span className="graph-spinner" />
-              loading graph…
+              {fetching
+                ? "loading graph…"
+                : `rendering ${(counts?.nodes ?? 0).toLocaleString()} nodes · ${(counts?.links ?? 0).toLocaleString()} edges…`}
             </div>
           </div>
         )}
