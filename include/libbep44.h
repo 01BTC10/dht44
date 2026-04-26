@@ -123,6 +123,17 @@ int          bep44_step (bep44_ctx_t *ctx, int timeout_ms);
  * readiness probe before issuing your first put/get. */
 int          bep44_good_nodes(const bep44_ctx_t *ctx);
 
+/*
+ * Inject a known-good IPv4 peer into the routing table. The address
+ * is given in dotted-quad notation, the port in host byte order. No
+ * traffic is generated until the node is touched by lookup activity.
+ * Useful for bootstrapping against your own DHT node or a known peer
+ * instead of (or in addition to) the public routers. Returns 0 on
+ * success.
+ */
+int          bep44_add_peer  (bep44_ctx_t *ctx,
+                              const char *ipv4, uint16_t port);
+
 /* ---------------- keys ---------------- */
 
 /* Generate a fresh Ed25519 keypair. Returns 0 on success. */

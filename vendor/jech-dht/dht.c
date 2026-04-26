@@ -379,13 +379,20 @@ print_hex(FILE *f, const unsigned char *buf, int buflen)
 static int
 is_martian(const struct sockaddr *sa)
 {
+    /* libbep44 patch: allow 127.0.0.0/8 when DHT_ALLOW_LOOPBACK is set,
+     * so localhost integration tests can run between two embedded
+     * library instances on the same host. Cached on first call. */
+    static int allow_loopback = -1;
+    if (allow_loopback < 0) {
+        allow_loopback = (getenv("DHT_ALLOW_LOOPBACK") != NULL) ? 1 : 0;
+    }
     switch(sa->sa_family) {
     case AF_INET: {
         struct sockaddr_in *sin = (struct sockaddr_in*)sa;
         const unsigned char *address = (const unsigned char*)&sin->sin_addr;
         return sin->sin_port == 0 ||
             (address[0] == 0) ||
-            (address[0] == 127) ||
+            (address[0] == 127 && !allow_loopback) ||
             ((address[0] & 0xE0) == 0xE0);
     }
     case AF_INET6: {

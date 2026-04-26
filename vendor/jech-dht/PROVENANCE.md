@@ -6,8 +6,8 @@ MIT (see `LICENCE` in this directory) and is preserved unchanged.
 
 ## Provenance
 
-Forked at upstream commit predating this snapshot, with **one local additive
-patch** on top:
+Forked at upstream commit predating this snapshot, with **two local patches**
+on top:
 
 - `Add dht_closest_nodes for target-sorted XOR-distance lookup` —
   introduces `dht_closest_nodes(target, af, sin/sin6, ids, max)`. Walks all
@@ -17,6 +17,13 @@ patch** on top:
   the same target converge to disjoint top-K sets and cross-node retrieval
   breaks. Patch is purely additive — no upstream symbol or behaviour was
   modified.
+
+- `is_martian honors DHT_ALLOW_LOOPBACK env var` — when the env var is
+  set, 127.0.0.0/8 is no longer treated as a martian source so two
+  libbep44 instances on the same host can round-trip during
+  integration tests. Default behaviour is unchanged. The check is
+  cached after the first call so getenv runs once per process. Used
+  by `tests/integration/lib_roundtrip.sh`.
 
 This was previously a git submodule pointing at a private fork. It was
 inlined as plain tracked files so cloning the project no longer requires

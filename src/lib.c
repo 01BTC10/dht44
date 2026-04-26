@@ -7,6 +7,7 @@
 
 #define _GNU_SOURCE
 
+#include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -19,6 +20,8 @@
 #include <unistd.h>
 
 #include <jansson.h>
+#include <openssl/hmac.h>
+#include <openssl/evp.h>
 #include <sodium.h>
 
 #include "libbep44.h"
@@ -28,6 +31,219 @@
 #include "dht_wrap.h"
 #include "lookup.h"
 #include "state.h"
+
+/* ============================================================
+ * Inbound BEP 44 server. The library doubles as a BEP 44 server:
+ * any peer that finds us in the routing table can issue get/put
+ * against us, and we'll answer from items/<target>.json on disk.
+ * Required for two libbep44 nodes to round-trip in isolation.
+ * ============================================================ */
+
+#define LIB_TOKEN_LEN 8
+static uint8_t g_token_secret[32];
+
+static void
+issue_token(uint8_t out[LIB_TOKEN_LEN], const struct sockaddr_in *peer,
+            const uint8_t target[BEP44_TARGET_LEN])
+{
+    uint8_t buf[4 + 2 + BEP44_TARGET_LEN];
+    memcpy(buf, &peer->sin_addr, 4);
+    memcpy(buf + 4, &peer->sin_port, 2);
+    memcpy(buf + 6, target, BEP44_TARGET_LEN);
+    unsigned char digest[20];
+    unsigned int  dlen = sizeof(digest);
+    HMAC(EVP_sha1(), g_token_secret, sizeof(g_token_secret),
+         buf, sizeof(buf), digest, &dlen);
+    memcpy(out, digest, LIB_TOKEN_LEN);
+}
+
+static int
+token_matches(const uint8_t *got, size_t got_len,
+              const struct sockaddr_in *peer,
+              const uint8_t target[BEP44_TARGET_LEN])
+{
+    if (got_len != LIB_TOKEN_LEN) return 0;
+    uint8_t want[LIB_TOKEN_LEN];
+    issue_token(want, peer, target);
+    return sodium_memcmp(got, want, LIB_TOKEN_LEN) == 0;
+}
+
+static void
+on_inbound_query(const struct sockaddr *peer, int peerlen,
+                 const uint8_t *tid, size_t tid_len,
+                 int is_put,
+                 const bencode_value *a,
+                 void *closure)
+{
+    (void)closure; (void)peerlen;
+    if (peer->sa_family != AF_INET) return;       /* v4-only for now */
+    const struct sockaddr_in *p4 = (const struct sockaddr_in *)peer;
+
+    if (!is_put) {
+        const bencode_value *t = bencode_dict_get(a, "target");
+        if (!t || t->type != BENCODE_STR || t->str.len != BEP44_TARGET_LEN) return;
+        uint8_t target[BEP44_TARGET_LEN];
+        memcpy(target, t->str.bytes, BEP44_TARGET_LEN);
+
+        stored_item si = { 0 };
+        int have = state_load_item(target, &si) == 0;
+        uint8_t token[LIB_TOKEN_LEN];
+        issue_token(token, p4, target);
+
+        uint8_t out[2048];
+        ssize_t n;
+        if (have && si.mutable_) {
+            n = bep44_build_get_response_mutable(
+                out, sizeof(out), tid, tid_len,
+                dht_wrap_node_id(), si.pk, NULL, 0, si.seq, si.sig,
+                token, sizeof(token), si.v, si.v_len);
+        } else if (have) {
+            n = bep44_build_get_response_immutable(
+                out, sizeof(out), tid, tid_len,
+                dht_wrap_node_id(), NULL, 0,
+                token, sizeof(token), si.v, si.v_len);
+        } else {
+            /* No item — still return a token so the requester can put. */
+            bencode_writer w;
+            bencode_writer_init(&w, out, sizeof(out));
+            bencode_dict_open(&w);
+                bencode_cstr(&w, "r");
+                bencode_dict_open(&w);
+                    bencode_cstr(&w, "id");
+                    bencode_str(&w, dht_wrap_node_id(), BEP44_NODE_ID_LEN);
+                    bencode_cstr(&w, "token");
+                    bencode_str(&w, token, sizeof(token));
+                bencode_dict_close(&w);
+                bencode_cstr(&w, "t"); bencode_str(&w, tid, tid_len);
+                bencode_cstr(&w, "y"); bencode_cstr(&w, "r");
+            bencode_dict_close(&w);
+            n = bencode_writer_finish(&w);
+        }
+        if (n > 0) dht_wrap_sendto(peer, peerlen, out, (size_t)n);
+        return;
+    }
+
+    /* PUT */
+    const bencode_value *target = bencode_dict_get(a, "target");
+    const bencode_value *tok    = bencode_dict_get(a, "token");
+    const bencode_value *v      = bencode_dict_get(a, "v");
+    const bencode_value *k      = bencode_dict_get(a, "k");
+    const bencode_value *salt   = bencode_dict_get(a, "salt");
+    const bencode_value *seqv   = bencode_dict_get(a, "seq");
+    const bencode_value *sig    = bencode_dict_get(a, "sig");
+    const bencode_value *casv   = bencode_dict_get(a, "cas");
+
+    if (!tok || tok->type != BENCODE_STR || !v || v->type != BENCODE_STR) return;
+
+    int is_mutable = (k && k->type == BENCODE_STR && k->str.len == BEP44_PK_LEN
+                      && sig && sig->type == BENCODE_STR && sig->str.len == BEP44_SIG_LEN
+                      && seqv && seqv->type == BENCODE_INT);
+
+    /* Re-bencode v as a string for sig + target. */
+    uint8_t vb[BEP44_MAX_V + 16];
+    bencode_writer vw;
+    bencode_writer_init(&vw, vb, sizeof(vb));
+    bencode_str(&vw, v->str.bytes, v->str.len);
+    ssize_t vb_len = bencode_writer_finish(&vw);
+    if (vb_len < 0) return;
+
+    uint8_t target_buf[BEP44_TARGET_LEN];
+    size_t  salt_len = (salt && salt->type == BENCODE_STR) ? salt->str.len : 0;
+    const uint8_t *salt_bytes = salt_len > 0 ? salt->str.bytes : NULL;
+
+    if (is_mutable) {
+        if (salt_len > BEP44_MAX_SALT) {
+            uint8_t out[128];
+            ssize_t n = bep44_build_error(out, sizeof(out), tid, tid_len,
+                                          207, "salt too long");
+            if (n > 0) dht_wrap_sendto(peer, peerlen, out, (size_t)n);
+            return;
+        }
+        bep44_target(target_buf, k->str.bytes, salt_bytes, salt_len);
+    } else {
+        bep44_immutable_target(target_buf, vb, (size_t)vb_len);
+    }
+
+    if (!token_matches(tok->str.bytes, tok->str.len, p4, target_buf)) {
+        uint8_t out[256];
+        ssize_t n = bep44_build_error(out, sizeof(out), tid, tid_len,
+                                      203, "bad token");
+        if (n > 0) dht_wrap_sendto(peer, peerlen, out, (size_t)n);
+        return;
+    }
+    if (target && target->type == BENCODE_STR
+        && target->str.len == BEP44_TARGET_LEN
+        && memcmp(target->str.bytes, target_buf, BEP44_TARGET_LEN) != 0) {
+        uint8_t out[256];
+        ssize_t n = bep44_build_error(out, sizeof(out), tid, tid_len,
+                                      203, "target mismatch");
+        if (n > 0) dht_wrap_sendto(peer, peerlen, out, (size_t)n);
+        return;
+    }
+
+    if (is_mutable) {
+        uint8_t signable[BEP44_MAX_V + 128];
+        ssize_t slen = bep44_signable(signable, sizeof(signable),
+                                      salt_bytes, salt_len,
+                                      seqv->i, vb, (size_t)vb_len);
+        if (slen < 0
+            || bep44_verify(sig->str.bytes, k->str.bytes,
+                            signable, (size_t)slen) < 0) {
+            uint8_t out[256];
+            ssize_t n = bep44_build_error(out, sizeof(out), tid, tid_len,
+                                          206, "invalid signature");
+            if (n > 0) dht_wrap_sendto(peer, peerlen, out, (size_t)n);
+            return;
+        }
+
+        stored_item existing = { 0 };
+        int have_existing = (state_load_item(target_buf, &existing) == 0);
+        if (have_existing && existing.mutable_) {
+            if (casv && casv->type == BENCODE_INT && casv->i != existing.seq) {
+                uint8_t out[256];
+                ssize_t n = bep44_build_error(out, sizeof(out), tid, tid_len,
+                                              301, "CAS mismatch");
+                if (n > 0) dht_wrap_sendto(peer, peerlen, out, (size_t)n);
+                return;
+            }
+            if (seqv->i <= existing.seq) {
+                uint8_t out[256];
+                ssize_t n = bep44_build_error(out, sizeof(out), tid, tid_len,
+                                              302, "seq must be > current");
+                if (n > 0) dht_wrap_sendto(peer, peerlen, out, (size_t)n);
+                return;
+            }
+        }
+
+        stored_item si = { 0 };
+        si.mutable_ = 1;
+        si.origin   = ITEM_ORIGIN_PEER;
+        memcpy(si.pk, k->str.bytes, BEP44_PK_LEN);
+        si.seq = seqv->i;
+        if (salt_len) { memcpy(si.salt, salt_bytes, salt_len); si.salt_len = salt_len; }
+        memcpy(si.sig, sig->str.bytes, BEP44_SIG_LEN);
+        /* Store the bencoded form so future get responses re-emit it
+         * verbatim via bencode_raw — get_response_mutable expects
+         * v_bencoded, not raw value bytes. */
+        if ((size_t)vb_len > sizeof(si.v)) return;
+        memcpy(si.v, vb, (size_t)vb_len);
+        si.v_len = (size_t)vb_len;
+        if (state_save_item(target_buf, &si) < 0) return;
+    } else {
+        if ((size_t)vb_len > BEP44_MAX_V) return;
+        stored_item si = { 0 };
+        si.mutable_ = 0;
+        si.origin = ITEM_ORIGIN_PEER;
+        memcpy(si.v, vb, (size_t)vb_len);
+        si.v_len = (size_t)vb_len;
+        if (state_save_item(target_buf, &si) < 0) return;
+    }
+
+    uint8_t out[256];
+    ssize_t n = bep44_build_put_response(out, sizeof(out), tid, tid_len,
+                                         dht_wrap_node_id());
+    if (n > 0) dht_wrap_sendto(peer, peerlen, out, (size_t)n);
+}
 
 /* ============================================================
  * One-context-per-process. dht_wrap_* are global; we enforce.
@@ -151,6 +367,10 @@ bep44_open(const bep44_opts_t *opts)
         return NULL;
     }
 
+    /* Fresh per-process token secret + inbound query server. */
+    randombytes_buf(g_token_secret, sizeof(g_token_secret));
+    dht_wrap_set_query_handler(on_inbound_query, NULL);
+
     /* Warm-start from any persisted nodes. */
     struct sockaddr_in warm[256];
     int warm_n = 0;
@@ -256,6 +476,18 @@ bep44_good_nodes(const bep44_ctx_t *ctx)
     int good = 0, dub = 0;
     dht_wrap_status(&good, &dub);
     return good;
+}
+
+int
+bep44_add_peer(bep44_ctx_t *ctx, const char *ipv4, uint16_t port)
+{
+    if (!ctx || !ctx->open || !ipv4) return -1;
+    struct sockaddr_in sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sin_family = AF_INET;
+    sa.sin_port = htons(port);
+    if (inet_pton(AF_INET, ipv4, &sa.sin_addr) != 1) return -1;
+    return dht_wrap_insert_warm(&sa);
 }
 
 /* ============================================================
