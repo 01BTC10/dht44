@@ -212,8 +212,8 @@ test_build_get_query(void)
     expect_dict_key_order(v, outer, 4, "get query outer");
 
     const bencode_value *aa = bencode_dict_get(v, "a");
-    const char *inner[] = { "id", "target" };
-    expect_dict_key_order(aa, inner, 2, "get query a");
+    const char *inner[] = { "id", "target", "want" };
+    expect_dict_key_order(aa, inner, 3, "get query a");
 
     const bencode_value *q = bencode_dict_get(v, "q");
     EXPECT(q && q->type == BENCODE_STR && q->str.len == 3
