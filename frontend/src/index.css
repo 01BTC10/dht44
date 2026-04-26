@@ -97,3 +97,13 @@ td.newrow { animation: flash 1.8s ease-out; }
 .bars .lbl { position: relative; padding: 1px 6px; z-index: 1; color: #d8dee6;
              white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .bars .n { position: relative; text-align: right; color: #8fc0ff; z-index: 1; padding-right: 6px; }
+
+@keyframes graph-spin { to { transform: rotate(360deg); } }
+.graph-spinner {
+  display: inline-block;
+  width: 18px; height: 18px;
+  border: 2px solid #2a3642;
+  border-top-color: #8fc0ff;
+  border-radius: 50%;
+  animation: graph-spin 0.8s linear infinite;
+}

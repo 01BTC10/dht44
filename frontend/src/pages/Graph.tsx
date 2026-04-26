@@ -51,6 +51,7 @@ export default function Graph() {
 
   const [limit, setLimit] = useState(1000);
   const [loading, setLoading] = useState(false);
+  const [phase, setPhase] = useState<"fetching" | "settling" | "ready">("fetching");
   const [data, setData]   = useState<{ nodes: Node[]; links: Link[] }>({ nodes: [], links: [] });
   const [counts, setCounts] = useState<{ nodes: number; links: number } | null>(null);
   const [showLegend, setShowLegend] = useState(true);
@@ -60,6 +61,7 @@ export default function Graph() {
 
   const load = async () => {
     setLoading(true);
+    setPhase("fetching");
     try {
       const r = await fetch(`/api/graph?limit=${limit}`);
       const g = await r.json();
@@ -69,7 +71,10 @@ export default function Graph() {
         .filter((e: Link) => e.source !== e.target);
       setData({ nodes, links });
       setCounts({ nodes: nodes.length, links: links.length });
-    } catch (e) { /* ignore */ }
+      setPhase(nodes.length > 0 ? "settling" : "ready");
+    } catch (e) {
+      setPhase("ready");
+    }
     setLoading(false);
   };
 
@@ -186,7 +191,31 @@ export default function Graph() {
           warmupTicks={50}
           cooldownTicks={200}        /* stop simulation after N ticks */
           onNodeHover={onNodeHover as any}
+          onEngineStop={() => setPhase("ready")}
         />
+
+        {phase !== "ready" && (
+          <div style={{
+            position: "absolute", inset: 0,
+            display: "flex", alignItems: "center", justifyContent: "center",
+            background: "rgba(10,12,15,0.65)",
+            backdropFilter: "blur(2px)",
+            zIndex: 20, pointerEvents: "none",
+          }}>
+            <div style={{
+              background: "#14181d", border: "1px solid #2a3642",
+              borderRadius: 4, padding: "14px 22px",
+              boxShadow: "0 6px 24px rgba(0,0,0,0.55)",
+              display: "flex", alignItems: "center", gap: 14,
+              color: "#d8dee6", fontSize: 13,
+            }}>
+              <span className="graph-spinner" />
+              {phase === "fetching"
+                ? "fetching graph…"
+                : `running force simulation (${(counts?.nodes ?? 0).toLocaleString()} nodes · ${(counts?.links ?? 0).toLocaleString()} edges)…`}
+            </div>
+          </div>
+        )}
 
         {/* Imperative tooltip */}
         <div
