@@ -777,7 +777,7 @@ db_select_graph_json(int limit)
 {
     if (!g_db) return NULL;
     if (limit <= 0) limit = 300;
-    if (limit > 10000) limit = 10000;
+    if (limit > 25000) limit = 25000;
 
     /*
      * Two-pass picker:
@@ -793,7 +793,7 @@ db_select_graph_json(int limit)
      * make the cut. No orphan periphery bubbles, no separate filter pass.
      */
     int cand_limit = limit * 3;
-    if (cand_limit > 10000) cand_limit = 10000;
+    if (cand_limit > 50000) cand_limit = 50000;
 
     typedef struct {
         char    ip[INET_ADDRSTRLEN];

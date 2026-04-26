@@ -1315,8 +1315,28 @@ cmd_daemon(int argc, char **argv)
     }
     if (g_args.web_port > 0) {
         http_ws_init(g_args.web_port, g_args.web_static);
-        if (g_args.geoip_city || g_args.geoip_asn) {
-            http_ws_set_geoip(g_args.geoip_city, g_args.geoip_asn);
+        /* Auto-discover GeoIP DBs at $DHT44_HOME/geoip/{city,asn}-lite.mmdb
+         * if the user didn't pass --geoip-* explicitly. The /api/peers
+         * country panel and the graph ASN coloring are useless without these
+         * files, and the failure mode (silent absence) was confusing. */
+        const char *city = g_args.geoip_city;
+        const char *asn  = g_args.geoip_asn;
+        char auto_city[768], auto_asn[768];
+        if (!city || !asn) {
+            char home[512];
+            if (state_home(home, sizeof(home)) == 0) {
+                if (!city) {
+                    snprintf(auto_city, sizeof(auto_city), "%s/geoip/city-lite.mmdb", home);
+                    if (access(auto_city, R_OK) == 0) city = auto_city;
+                }
+                if (!asn) {
+                    snprintf(auto_asn, sizeof(auto_asn), "%s/geoip/asn-lite.mmdb", home);
+                    if (access(auto_asn, R_OK) == 0) asn = auto_asn;
+                }
+            }
+        }
+        if (city || asn) {
+            http_ws_set_geoip(city, asn);
         }
         observe_set_event_sink(ws_bridge, NULL);
     }
