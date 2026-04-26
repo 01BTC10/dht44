@@ -13,9 +13,14 @@ export default defineConfig({
   build: {
     outDir: "dist",
     assetsDir: ".",
+    /* Hashed filenames so each rebuild ships a unique URL — the daemon's
+     * cache-control: no-store on index.html guarantees the browser sees
+     * the new <script src=…> on next reload, and any in-flight cache of
+     * the previous bundle stops mattering. */
     rollupOptions: {
-      output: { entryFileNames: "main.js", chunkFileNames: "[name].js",
-                assetFileNames: "[name][extname]" },
+      output: { entryFileNames: "main-[hash].js",
+                chunkFileNames: "[name]-[hash].js",
+                assetFileNames: "[name]-[hash][extname]" },
     },
   },
 });
