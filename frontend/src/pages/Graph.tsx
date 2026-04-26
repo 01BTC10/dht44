@@ -1,7 +1,9 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import ForceGraph3D from "react-force-graph-3d";
 import type { ForceGraph3DInstance } from "3d-force-graph";
 import { countryFlag, countryName, decodeVString, hex } from "../ws";
+import PeerSidePanel from "../components/PeerSidePanel";
+import type { CrawlerClass } from "../components/CrawlerBadge";
 
 /*
  * Bubble graph: nodes are peers, an edge A→B means A returned B in a
@@ -12,30 +14,61 @@ import { countryFlag, countryName, decodeVString, hex } from "../ws";
  * raycast-based hover.
  */
 
-type Node = {
+export type Geo = {
+  country?: string; city?: string;
+  asn?: number; asn_org?: string;
+  lat?: number; lon?: number;
+};
+
+export type Node = {
   id: string;
   ip: string;
   port: number;
   deg: number;
   v_string?: string | null;
+  node_id?: string | null;
   country?: string | null;
+  geo?: Geo;
   as_src?: number;
   as_dst?: number;
   same_ip?: number;
-  likely_crawler?: number;
+  first_seen?: number;
+  last_seen?: number;
+  queries_in?: number;
+  queries_out?: number;
+  rtt_ms?: number | null;
+  ro?: number | null;
+  bep42_ok?: number | null;
   supports_bep51?: number | null;
+  likely_crawler?: number;
+  crawler_class?: CrawlerClass;
+  crawler_score?: number;
+  crawler_signals?: string[];
+  crawler_reason?: string;
   /* runtime fields written by force-graph */
   x?: number; y?: number; z?: number;
 };
 
 type Link = { source: string; target: string };
 
-/* Deterministic ISO → CSS hsl color string */
-function colorFor(iso?: string | null): string {
-  if (!iso || iso.length !== 2) return "hsl(210, 10%, 60%)";
-  let hash = 0;
-  for (let i = 0; i < iso.length; i++) hash = (hash * 31 + iso.charCodeAt(i)) >>> 0;
-  return `hsl(${hash % 360}, 62%, 60%)`;
+/* Deterministic string → CSS hsl color. Used for both ASN org and country. */
+function hashHsl(s: string, sat = 62, light = 60): string {
+  let h = 2166136261 >>> 0;
+  for (let i = 0; i < s.length; i++) {
+    h = (h ^ s.charCodeAt(i)) >>> 0;
+    h = Math.imul(h, 16777619) >>> 0;
+  }
+  return `hsl(${h % 360}, ${sat}%, ${light}%)`;
+}
+
+/* Color preference: ASN org > country > neutral grey. ASN groups hosting
+ * clusters (Hetzner / OVH / Contabo) into one visible blob. */
+function colorFor(node: Node): string {
+  const org = node.geo?.asn_org;
+  if (org && org.length > 0) return hashHsl(org);
+  const iso = node.country;
+  if (iso && iso.length === 2) return hashHsl(iso, 50, 55);
+  return "hsl(210, 10%, 60%)";
 }
 
 function escHTML(s: string | null | undefined): string {
@@ -57,9 +90,53 @@ export default function Graph() {
   const [data, setData]   = useState<{ nodes: Node[]; links: Link[] }>({ nodes: [], links: [] });
   const [counts, setCounts] = useState<{ nodes: number; links: number } | null>(null);
   const [showLegend, setShowLegend] = useState(true);
+  const [selected, setSelected] = useState<Node | null>(null);
+
+  /* Filter + search state */
+  type AliveFilter = "all" | "6h" | "24h" | "stale";
+  type FamilyFilter = "all" | "v4" | "v6";
+  const [aliveFilter,  setAliveFilter]  = useState<AliveFilter>("all");
+  const [familyFilter, setFamilyFilter] = useState<FamilyFilter>("all");
+  const ALL_CLASSES: CrawlerClass[] = ["ok", "crawler", "monitor", "honeypot"];
+  const [classFilter, setClassFilter] = useState<Set<CrawlerClass>>(new Set(ALL_CLASSES));
+  const [bep51Only,   setBep51Only]   = useState(false);
+  const [search, setSearch]   = useState("");
+  const [hilite, setHilite] = useState<Set<string>>(new Set());
 
   /* Track viewport size so the graph re-fits the container. */
   const [size, setSize] = useState<{ w: number; h: number }>({ w: 800, h: 600 });
+
+  /* Derive filtered/searched data. Also rebuild the link list to drop edges
+   * whose endpoints fell out — otherwise force-graph crashes on dangling
+   * source/target ids. */
+  const displayed = useMemo(() => {
+    const now = Date.now() / 1000;
+    const wantClass = (n: Node) => classFilter.has((n.crawler_class ?? "ok") as CrawlerClass);
+    const wantAlive = (n: Node) => {
+      if (aliveFilter === "all") return true;
+      const ls = n.last_seen ?? 0;
+      const age = now - ls;
+      if (aliveFilter === "6h")    return age <= 6 * 3600;
+      if (aliveFilter === "24h")   return age <= 24 * 3600;
+      /* stale */                   return age > 24 * 3600;
+    };
+    const wantFamily = (n: Node) => {
+      if (familyFilter === "all") return true;
+      const v6 = n.ip.includes(":");
+      return familyFilter === "v6" ? v6 : !v6;
+    };
+    const wantBep51 = (n: Node) => !bep51Only || n.supports_bep51 === 1;
+
+    const nodes = data.nodes.filter(n =>
+      wantClass(n) && wantAlive(n) && wantFamily(n) && wantBep51(n));
+    const ids = new Set(nodes.map(n => n.id));
+    const links = data.links.filter(l => {
+      const s = typeof l.source === "string" ? l.source : (l.source as any).id;
+      const t = typeof l.target === "string" ? l.target : (l.target as any).id;
+      return ids.has(s) && ids.has(t);
+    });
+    return { nodes, links };
+  }, [data, aliveFilter, familyFilter, classFilter, bep51Only]);
 
   const clearSettleTimer = () => {
     if (settleTimer.current != null) {
@@ -156,9 +233,81 @@ export default function Graph() {
     return () => window.removeEventListener("mousemove", onMove);
   }, []);
 
+  /* Esc closes the side panel. */
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setSelected(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  /* Search → flash matching nodes + fly camera to first match. */
+  const runSearch = () => {
+    const q = search.trim().toLowerCase();
+    if (!q) { setHilite(new Set()); return; }
+    const matches = displayed.nodes.filter(n => {
+      if (n.ip.toLowerCase().includes(q)) return true;
+      if (n.id.toLowerCase().includes(q)) return true;
+      if (n.node_id && n.node_id.toLowerCase().startsWith(q)) return true;
+      const v = n.v_string ? decodeVString(n.v_string).toLowerCase() : "";
+      if (v.includes(q)) return true;
+      const org = (n.geo?.asn_org ?? "").toLowerCase();
+      if (org.includes(q)) return true;
+      return false;
+    });
+    setHilite(new Set(matches.map(m => m.id)));
+    const first: any = matches[0];
+    if (first && fgRef.current && first.x != null) {
+      const dist = 80;
+      const r = Math.hypot(first.x, first.y, first.z) || 1;
+      const k = (r + dist) / r;
+      fgRef.current.cameraPosition(
+        { x: first.x * k, y: first.y * k, z: first.z * k },
+        first, 1500);
+    }
+  };
+
+  /* Edge fade by camera zoom: at large node counts, only show the link if
+   * either endpoint is near the camera. Cheap; runs per frame per link. */
+  const linkVisibility = (l: any): boolean => {
+    if (displayed.nodes.length <= 1500) return true;
+    const cam: any = (fgRef.current as any)?.camera?.();
+    if (!cam) return true;
+    const a = l.source, b = l.target;
+    if (!a || a.x == null) return true;
+    const da = Math.hypot(a.x - cam.position.x, a.y - cam.position.y, a.z - cam.position.z);
+    if (da < 700) return true;
+    if (b && b.x != null) {
+      const db = Math.hypot(b.x - cam.position.x, b.y - cam.position.y, b.z - cam.position.z);
+      if (db < 700) return true;
+    }
+    return false;
+  };
+
+  const Chip = ({ active, onClick, children, color }:
+    { active: boolean; onClick: () => void; children: React.ReactNode; color?: string }) => (
+    <button onClick={onClick}
+            style={{
+              padding: "2px 9px", fontSize: 11, marginRight: 4,
+              borderRadius: 11, cursor: "pointer",
+              background: active ? (color ?? "#1f2a36") : "#14181d",
+              border: `1px solid ${active ? (color ?? "#8fc0ff") : "#232a31"}`,
+              color: active ? "#fff" : "#8892a0",
+            }}>{children}</button>
+  );
+
+  const toggleClass = (c: CrawlerClass) => {
+    setClassFilter(prev => {
+      const next = new Set(prev);
+      if (next.has(c)) next.delete(c); else next.add(c);
+      return next;
+    });
+  };
+
   return (
     <>
-      <div className="filter">
+      <div className="filter" style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6 }}>
         <label>
           nodes:{" "}
           <select value={limit} onChange={e => setLimit(parseInt(e.target.value))}>
@@ -169,16 +318,44 @@ export default function Graph() {
             <option value={5000}>5,000 (max)</option>
           </select>
         </label>
-        <button style={{ marginLeft: 10 }} onClick={load} disabled={busy}>
+        <button style={{ marginLeft: 6 }} onClick={load} disabled={busy}>
           {busy ? "loading…" : "reload"}
         </button>
-        <button style={{ marginLeft: 6 }}
-                onClick={() => fgRef.current?.zoomToFit(800)}>
-          fit
-        </button>
-        <span className="small" style={{ marginLeft: 14 }}>
+        <button onClick={() => fgRef.current?.zoomToFit(800)}>fit</button>
+        <input
+          placeholder="search ip / asn / node-id / client…"
+          value={search}
+          onChange={e => setSearch(e.target.value)}
+          onKeyDown={e => { if (e.key === "Enter") runSearch(); }}
+          style={{ background: "#0f1316", color: "#d8dee6",
+                   border: "1px solid #232a31", padding: "3px 8px",
+                   borderRadius: 2, width: 220, marginLeft: 8 }}
+        />
+        <button onClick={runSearch}>find</button>
+        {hilite.size > 0 && (
+          <button onClick={() => { setHilite(new Set()); setSearch(""); }}>clear</button>
+        )}
+        <span style={{ marginLeft: 12, fontSize: 10, color: "#8892a0" }}>alive:</span>
+        {(["all","6h","24h","stale"] as const).map(a => (
+          <Chip key={a} active={aliveFilter === a} onClick={() => setAliveFilter(a)}>
+            {a}
+          </Chip>
+        ))}
+        <span style={{ marginLeft: 6, fontSize: 10, color: "#8892a0" }}>family:</span>
+        {(["all","v4","v6"] as const).map(f => (
+          <Chip key={f} active={familyFilter === f} onClick={() => setFamilyFilter(f)}>
+            {f}
+          </Chip>
+        ))}
+        <span style={{ marginLeft: 6, fontSize: 10, color: "#8892a0" }}>class:</span>
+        <Chip active={classFilter.has("ok")} color="#3a4a3a" onClick={() => toggleClass("ok")}>ok</Chip>
+        <Chip active={classFilter.has("crawler")}  color="#8a3e54" onClick={() => toggleClass("crawler")}>crawler</Chip>
+        <Chip active={classFilter.has("monitor")}  color="#8a6a2e" onClick={() => toggleClass("monitor")}>monitor</Chip>
+        <Chip active={classFilter.has("honeypot")} color="#8a2e2e" onClick={() => toggleClass("honeypot")}>honeypot</Chip>
+        <Chip active={bep51Only} onClick={() => setBep51Only(b => !b)}>BEP 51 only</Chip>
+        <span className="small" style={{ marginLeft: 8 }}>
           {counts
-            ? `${counts.nodes.toLocaleString()} nodes · ${counts.links.toLocaleString()} edges (drag to orbit, scroll to zoom)`
+            ? `${displayed.nodes.length.toLocaleString()} / ${counts.nodes.toLocaleString()} nodes · ${displayed.links.length.toLocaleString()} / ${counts.links.toLocaleString()} edges`
             : ""}
         </span>
       </div>
@@ -193,20 +370,22 @@ export default function Graph() {
           width={size.w}
           height={size.h}
           backgroundColor="#0a0c0f"
-          graphData={data}
+          graphData={displayed}
           nodeId="id"
           nodeVal={(n: any) => Math.max(1, Math.sqrt(n.deg || 1) * 1.4)}
-          nodeColor={(n: any) => colorFor(n.country)}
+          nodeColor={(n: any) => hilite.has(n.id) ? "#ffeb3b" : colorFor(n)}
           nodeOpacity={0.95}
           nodeResolution={8}        /* sphere segments — lower = faster */
           linkColor={() => "rgba(160,195,235,0.6)"}
           linkOpacity={0.55}
           linkWidth={1.2}
+          linkVisibility={linkVisibility as any}
           enableNodeDrag={false}    /* dragging triggers extra simulation */
           showNavInfo={false}
           warmupTicks={50}
           cooldownTicks={200}        /* stop simulation after N ticks */
           onNodeHover={onNodeHover as any}
+          onNodeClick={(n: any) => setSelected(n as Node)}
           onEngineStop={() => { clearSettleTimer(); setSettling(false); }}
         />
 
@@ -269,7 +448,16 @@ export default function Graph() {
               </div>
               <div style={{ color: "#a0a8b0", marginBottom: 8 }}>
                 <b style={{ color: "#8fc0ff" }}>color</b>
-                <br/>= peer's country (ISO → HSL hash).
+                <br/>= peer's ASN org (hosting cluster).
+                Falls back to country, then grey.
+              </div>
+              <div style={{ color: "#a0a8b0", marginBottom: 8 }}>
+                <b style={{ color: "#ffeb3b" }}>yellow</b>
+                <br/>= search match (find).
+              </div>
+              <div style={{ color: "#a0a8b0", marginBottom: 8 }}>
+                <b style={{ color: "#8fc0ff" }}>click a node</b>
+                <br/>= open detail panel (Esc closes).
               </div>
               <div style={{ color: "#a0a8b0", marginBottom: 8 }}>
                 <b style={{ color: "#8fc0ff" }}>line</b>
@@ -288,6 +476,8 @@ export default function Graph() {
           )}
         </div>
       </div>
+
+      {selected && <PeerSidePanel node={selected} onClose={() => setSelected(null)} />}
     </>
   );
 }
