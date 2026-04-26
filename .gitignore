@@ -1,11 +1,19 @@
 # build artifacts
 *.o
-dht44
+*.a
+libbep44.a
 
 # test binaries
 tests/test_*
 !tests/test_*.c
 !tests/test_*.h
+tests/lib_driver
+
+# example binaries
+examples/minimal
+
+# library state created by examples / running tests
+libbep44_state/
 
 # editor/scratch
 *.swp
