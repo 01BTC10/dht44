@@ -17,7 +17,7 @@ export default function BlogDhtSize() {
       />
       <ArticleLayout
         crumbs={[
-          { label: "Home", to: "/" },
+          { label: "Home", to: "/intro" },
           { label: "Blog", to: "/blog" },
           { label: "DHT size" },
         ]}

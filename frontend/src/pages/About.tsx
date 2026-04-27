@@ -11,7 +11,7 @@ export default function About() {
         type="article"
       />
       <ArticleLayout
-        crumbs={[{ label: "Home", to: "/" }, { label: "About" }]}
+        crumbs={[{ label: "Home", to: "/intro" }, { label: "About" }]}
         title="About dht44"
         lede="An open-source toolkit for the BitTorrent Mainline DHT, written in C and MIT licensed."
       >

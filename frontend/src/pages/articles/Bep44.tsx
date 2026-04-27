@@ -17,7 +17,7 @@ export default function Bep44() {
       />
       <ArticleLayout
         crumbs={[
-          { label: "Home", to: "/" },
+          { label: "Home", to: "/intro" },
           { label: "Protocol", to: "/protocol" },
           { label: "BEP 44" },
         ]}

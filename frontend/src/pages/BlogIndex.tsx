@@ -34,7 +34,7 @@ export default function BlogIndex() {
         path="/blog"
       />
       <ArticleLayout
-        crumbs={[{ label: "Home", to: "/" }, { label: "Blog" }]}
+        crumbs={[{ label: "Home", to: "/intro" }, { label: "Blog" }]}
         title="Writing"
         lede="Long-form posts on Kademlia, the BitTorrent DHT, BEP 44, and what the live crawler is seeing."
       >

@@ -11,7 +11,7 @@ export default function Privacy() {
         type="article"
       />
       <ArticleLayout
-        crumbs={[{ label: "Home", to: "/" }, { label: "Privacy" }]}
+        crumbs={[{ label: "Home", to: "/intro" }, { label: "Privacy" }]}
         title="Privacy Policy"
         lede="Two distinct privacy stories live on this site: what we collect about you when you visit dht44.com, and what the crawler observes about peers on the public BitTorrent DHT. Both are documented below."
       >

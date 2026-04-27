@@ -17,7 +17,7 @@ export default function SiteShell() {
   return (
     <div className="site">
       <header className="site-header">
-        <Link to="/" className="brand">dht44</Link>
+        <Link to="/intro" className="brand">dht44</Link>
         <nav className="site-nav">
           {NAV.map(n => (
             <NavLink

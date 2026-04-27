@@ -17,7 +17,7 @@ export default function LibApi() {
       />
       <ArticleLayout
         crumbs={[
-          { label: "Home", to: "/" },
+          { label: "Home", to: "/intro" },
           { label: "Library", to: "/lib" },
           { label: "API" },
         ]}

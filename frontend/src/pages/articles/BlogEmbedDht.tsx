@@ -17,7 +17,7 @@ export default function BlogEmbedDht() {
       />
       <ArticleLayout
         crumbs={[
-          { label: "Home", to: "/" },
+          { label: "Home", to: "/intro" },
           { label: "Blog", to: "/blog" },
           { label: "Embed DHT" },
         ]}

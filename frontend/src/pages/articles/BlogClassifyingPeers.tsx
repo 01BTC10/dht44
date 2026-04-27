@@ -17,7 +17,7 @@ export default function BlogClassifyingPeers() {
       />
       <ArticleLayout
         crumbs={[
-          { label: "Home", to: "/" },
+          { label: "Home", to: "/intro" },
           { label: "Blog", to: "/blog" },
           { label: "Classifying peers" },
         ]}

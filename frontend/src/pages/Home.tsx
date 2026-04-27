@@ -6,7 +6,7 @@ const homeJsonLd = [
     "@context": "https://schema.org",
     "@type": "WebSite",
     "@id": "https://dht44.com/#website",
-    url: "https://dht44.com/",
+    url: "https://dht44.com/intro",
     name: "dht44",
     alternateName: "libbep44",
     description:
@@ -19,7 +19,7 @@ const homeJsonLd = [
     "@type": "Organization",
     "@id": "https://dht44.com/#org",
     name: "dht44",
-    url: "https://dht44.com/",
+    url: "https://dht44.com/intro",
     sameAs: ["https://github.com/01BTC10/dht44"],
   },
 ];
@@ -30,7 +30,7 @@ export default function Home() {
       <SEO
         title="dht44 — Live BitTorrent Mainline DHT Observability"
         description="Open-source BitTorrent DHT crawler and BEP 44 toolkit. Live peer/query stream, infohash sampling, and a C library you can embed. Read the protocol, see the network."
-        path="/"
+        path="/intro"
         jsonLd={homeJsonLd}
       />
       <section className="hero">

@@ -60,7 +60,7 @@ export default function ProtocolHub() {
         jsonLd={faqJsonLd}
       />
       <ArticleLayout
-        crumbs={[{ label: "Home", to: "/" }, { label: "Protocol" }]}
+        crumbs={[{ label: "Home", to: "/intro" }, { label: "Protocol" }]}
         title="Protocol reference"
         lede="A field guide to the protocols that make the BitTorrent DHT work — what's on the wire, why it's shaped that way, and the gotchas."
       >

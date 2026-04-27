@@ -27,8 +27,12 @@ import Graph      from "./pages/Graph";
 export default function App() {
   return (
     <Routes>
+      {/* Default landing: redirect / to the dashboard. The marketing home
+       * lives at /intro and is linked from the dashboard header. */}
+      <Route path="/" element={<Navigate to="/dashboard/peers" replace />} />
+
       <Route element={<SiteShell />}>
-        <Route path="/"               element={<Home />} />
+        <Route path="/intro"          element={<Home />} />
         <Route path="/about"          element={<About />} />
         <Route path="/privacy"        element={<Privacy />} />
 

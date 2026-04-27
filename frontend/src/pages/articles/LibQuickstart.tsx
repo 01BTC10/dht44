@@ -17,7 +17,7 @@ export default function LibQuickstart() {
       />
       <ArticleLayout
         crumbs={[
-          { label: "Home", to: "/" },
+          { label: "Home", to: "/intro" },
           { label: "Library", to: "/lib" },
           { label: "Quickstart" },
         ]}

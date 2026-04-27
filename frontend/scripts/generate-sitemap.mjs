@@ -12,7 +12,13 @@ import path from "node:path";
 const SITE = "https://dht44.com";
 
 const routes = [
-  { path: "/",                          priority: 1.0,  changefreq: "weekly" },
+  /* Default landing: `/` redirects to /dashboard/peers, which is the
+   * canonical entry. /intro is the marketing/explainer page (now
+   * secondary). The other dashboard tabs (queries/infohashes/bep44/
+   * graph) all live under /dashboard/peers in terms of UX, so we only
+   * list the one canonical dashboard URL. */
+  { path: "/dashboard/peers",           priority: 1.0,  changefreq: "daily"   },
+  { path: "/intro",                     priority: 0.8,  changefreq: "weekly"  },
   { path: "/about",                     priority: 0.6,  changefreq: "monthly" },
   { path: "/privacy",                   priority: 0.4,  changefreq: "yearly"  },
 

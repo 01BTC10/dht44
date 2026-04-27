@@ -12,7 +12,7 @@ export default function LibLanding() {
         type="article"
       />
       <ArticleLayout
-        crumbs={[{ label: "Home", to: "/" }, { label: "Library" }]}
+        crumbs={[{ label: "Home", to: "/intro" }, { label: "Library" }]}
         title="libbep44"
         lede="A small async C library that embeds the BitTorrent Mainline DHT and BEP 44 mutable + immutable items into your program. You bring the event loop; the library brings the network."
       >
