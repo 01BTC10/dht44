@@ -56,6 +56,8 @@ shape. `git switch main` for the daemon flavor.
       [`bep44_get_mutable`](#bep44_get_mutable) ·
       [`bep44_get_immutable`](#bep44_get_immutable)
 - [State directory](#state-directory)
+- [Persistence and republish](#persistence-and-republish)
+- [NAT traversal (UPnP)](#nat-traversal-upnp)
 - [Threading model](#threading-model)
 - [Tests](#tests)
 - [License](#license)
@@ -65,13 +67,13 @@ shape. `git switch main` for the daemon flavor.
 System packages (Arch Linux):
 
 ```sh
-sudo pacman -S libsodium openssl jansson
+sudo pacman -S libsodium openssl jansson miniupnpc
 ```
 
 Or on Debian/Ubuntu:
 
 ```sh
-sudo apt install libsodium-dev libssl-dev libjansson-dev
+sudo apt install libsodium-dev libssl-dev libjansson-dev libminiupnpc-dev
 ```
 
 Build:
@@ -90,7 +92,7 @@ Static archive at `libbep44.a`, public header at `include/libbep44.h`.
 gcc your_app.c \
     -I/path/to/bep44_dht/include \
     /path/to/bep44_dht/libbep44.a \
-    -lsodium -lcrypto -ljansson \
+    -lsodium -lcrypto -ljansson -lminiupnpc \
     -o your_app
 ```
 
@@ -165,7 +167,7 @@ int main(void) {
 ```
 
 ```sh
-gcc quickstart.c libbep44.a -Iinclude -lsodium -lcrypto -ljansson -o quickstart
+gcc quickstart.c libbep44.a -Iinclude -lsodium -lcrypto -ljansson -lminiupnpc -o quickstart
 mkdir -p quickstart_state
 ./quickstart
 ```
@@ -194,8 +196,11 @@ key is the libsodium 64-byte combined form (seed + pk).
 | Field | Type | Meaning |
 |---|---|---|
 | `port` | `int` | UDP port (use `0` to let the OS pick) |
-| `state_dir` | `const char *` | **Required.** Where node id and warm-start nodes are persisted |
+| `state_dir` | `const char *` | **Required.** Where node id, warm-start nodes, and stored items are persisted |
 | `bootstrap_routers` | `int` | Non-zero = ping the four public routers on open |
+| `use_upnp` | `int` | Non-zero = ask the gateway to forward `port` via UPnP IGD (best-effort; failure is logged and the library continues) |
+| `upnp_lifetime_sec` | `int` | UPnP lease duration; `0` defaults to 3600 |
+| `republish_minutes` | `int` | Re-push every stored item on this cadence so it doesn't expire from peer caches. `0` defaults to 60. Negative disables. See [Persistence and republish](#persistence-and-republish). |
 
 `bep44_put_result_t` — passed to put callback:
 
@@ -793,6 +798,105 @@ The `state_dir` you pass to `bep44_open` accumulates:
 You can keep a keyfile alongside (e.g. `state_dir/key.json`), but
 that's just convention — `bep44_save_key` / `bep44_load_key` accept
 arbitrary paths.
+
+## Persistence and republish
+
+BEP 44 items are not permanent on the network. Storers expire them
+after **about 2 hours** unless somebody re-pushes them. If you publish
+once and then sleep for 3 hours, your value is gone — even though
+your node is still up.
+
+Two consequences in practice:
+
+1. **`put` then immediate `get` from a fresh process** is unreliable.
+   The 8 closest peers your put hit may not be in the get's routing
+   table yet, so the lookup converges elsewhere. (You'll see
+   "stored on 15 nodes" then `not found` from a separate process.)
+2. **Long-lived publication needs a long-lived process.** Whoever
+   wants their value to stay reachable has to keep re-pushing it.
+
+The library does this for you when `bep44_step` is called regularly
+in a long-running process:
+
+- Every put — yours via `bep44_put_*` and any peer-origin put your
+  inbound server accepts — is persisted to `state_dir/items/<target>.json`.
+- Every `republish_minutes` (default 60) the library walks that
+  directory and re-issues each item's put. For peer-origin items it
+  re-emits the stored signed bytes verbatim, so no key is needed.
+  For self-origin items it does the same — the signature you made at
+  put time is still valid because the seq, value, and salt didn't
+  change.
+
+Tuning notes:
+
+- The default of 60 minutes is intentionally well below the ~2h peer
+  expiry. Going lower than ~15 min is wasteful; going above 90 min
+  flirts with the expiry window.
+- Set `opts.republish_minutes = -1` if you really want to opt out
+  (e.g. you're the publisher *and* you're going to call `bep44_put_*`
+  yourself on a custom schedule with bumped seq).
+- **You must keep your process running and calling `bep44_step`** for
+  republish to fire. A short-lived `--put` that exits immediately
+  publishes once and then leaves no agent behind. If that's your
+  pattern, plan to invoke the publisher again before 2h pass — or
+  run a long-lived agent (the next section).
+
+### Long-lived publisher snippet
+
+```c
+bep44_opts_t opts = {
+    .port = 6881,
+    .state_dir = "./state",
+    .bootstrap_routers = 1,
+    .use_upnp = 1,
+    .republish_minutes = 60,        /* default; shown for clarity */
+};
+bep44_ctx_t *ctx = bep44_open(&opts);
+
+/* Publish once. */
+bep44_keypair_t kp; /* loaded or generated */
+bep44_put_mutable(ctx, &kp, NULL, 0, 1, -1,
+                  (uint8_t *)"5:hello", 7, on_put, NULL);
+
+/* Drive the loop forever. The library republishes every 60 min on
+ * its own; you don't have to call put again. */
+while (running) bep44_step(ctx, 250);
+```
+
+The republish sweep runs at most 4 lookups concurrently per cycle, so
+holding many items doesn't hammer the network in bursts — large
+collections are spread across a few seconds.
+
+## NAT traversal (UPnP)
+
+If you're behind a NAT — typical for a home or office machine — your
+node can reach the public DHT outbound but other peers can't reach
+you inbound. That means:
+
+- **Your puts still work** (outbound).
+- **Peers can't ask you for what you've stored** (inbound). You won't
+  show up in others' routing tables long-term, you can't serve as a
+  storer for arbitrary peer items, and your own value lives only on
+  the original 8 closest peers (with the usual ~2h expiry).
+
+Set `opts.use_upnp = 1` and the library asks your gateway to forward
+your UDP port via UPnP IGD on open, refreshes the lease every
+`upnp_lifetime_sec / 2`, and tears the mapping down on `bep44_close`.
+Failures (no IGD, IGD refused) are logged and non-fatal — the library
+just continues without the mapping.
+
+UPnP only works when:
+
+- Your gateway has UPnP enabled (most home routers do; many corp
+  networks don't).
+- You passed a fixed `opts.port` (UPnP needs a known external port).
+  `port = 0` skips UPnP since the OS-picked port would change between
+  runs anyway.
+- The library was linked against `libminiupnpc` (it is by default).
+
+If UPnP fails or isn't available, options are: configure a manual
+port forward on your router, run on a public IP, or accept that you
+work as an outbound-only client.
 
 ## Threading model
 
