@@ -6,6 +6,7 @@
 
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
 
+
     <!-- Defaults — every page overrides these via <SEO> + react-helmet-async -->
     <title>dht44 — BitTorrent Mainline DHT toolkit</title>
     <meta name="description" content="Open-source BitTorrent Mainline DHT crawler and BEP 44 C library — live network observability plus a developer-facing protocol reference." />
@@ -25,6 +26,79 @@
     <!-- Tell crawlers about the AI-friendly Markdown summary -->
     <link rel="alternate" type="text/plain" href="/llms.txt" title="llms.txt" />
 
+    <!-- Structured data for non-JS-rendering crawlers (Bing, DDG, AI bots,
+         archive crawlers). Describes the dashboard as a public dataset
+         with the metric dimensions it exposes. Eligible for rich results
+         in Google. Static — concrete values come from /api/stats live. -->
+    <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@type": "Dataset",
+      "name": "Live BitTorrent Mainline DHT observation",
+      "description": "Real-time observation of the public BitTorrent Mainline DHT: live peer counts, IPv4/IPv6 split, queries-per-minute, BEP 51 sample_infohashes share, top BitTorrent clients (libtorrent / µTorrent / qBittorrent / XD / JC), top peer countries, infohash source breakdown (get_peers / BEP 51 / find_node target), and a multi-signal classifier (ok / crawler / monitor / honeypot).",
+      "url": "https://dht44.com/dashboard/peers",
+      "keywords": [
+        "BitTorrent",
+        "Mainline DHT",
+        "Kademlia",
+        "BEP 5",
+        "BEP 44",
+        "BEP 51",
+        "DHT crawler",
+        "libtorrent",
+        "uTorrent",
+        "qBittorrent",
+        "peer observation",
+        "DHT observability",
+        "infohash sampling"
+      ],
+      "creator": {
+        "@type": "Person",
+        "name": "01BTC10",
+        "url": "https://github.com/01BTC10"
+      },
+      "license": "https://opensource.org/licenses/MIT",
+      "isAccessibleForFree": true,
+      "variableMeasured": [
+        { "@type": "PropertyValue", "name": "unique peers observed",         "description": "Cumulative count of distinct (ip, port) DHT peers seen since the observation database opened. IPs are redacted to /24 (IPv4) and /48 (IPv6) before being exposed." },
+        { "@type": "PropertyValue", "name": "alive peers (6h / 24h)",        "description": "Peers whose last_seen timestamp is within the last 6 or 24 hours. The liveness sweeper re-pings every observed peer on a rolling cadence so this stays meaningful." },
+        { "@type": "PropertyValue", "name": "queries-per-minute",            "description": "Inbound + outbound DHT queries observed in the last 60 seconds: ping, find_node, get_peers, announce_peer, and BEP 51 sample_infohashes." },
+        { "@type": "PropertyValue", "name": "infohashes seen",               "description": "Distinct BEP 5 / BEP 51 infohashes referenced in observed queries, deduplicated across discovery sources." },
+        { "@type": "PropertyValue", "name": "top BitTorrent clients",        "description": "Distribution by BEP 20 v-string prefix (libtorrent, µTorrent, qBittorrent, Transmission, Deluge, XD, JC, …) of identified peers." },
+        { "@type": "PropertyValue", "name": "top peer countries",            "description": "GeoIP attribution of unique peer prefixes via MaxMind GeoLite2; commonly led by China, United States, Japan, Taiwan, France, Russia, Netherlands." },
+        { "@type": "PropertyValue", "name": "infohashes by discovery source","description": "How each infohash was first observed: get_peers query, BEP 51 sample_infohashes response, or a find_node target." },
+        { "@type": "PropertyValue", "name": "classifier label",              "description": "Multi-signal classifier per peer: ok | crawler | monitor | honeypot. Inputs include reply ratio, BEP 42 secure-id check, BEP 51 support, and v-string anomalies." },
+        { "@type": "PropertyValue", "name": "peer graph (in-result degree)", "description": "3D force-directed graph of who returns whom in find_node replies, restricted to the top-N internally-connected nodes." }
+      ],
+      "distribution": [
+        {
+          "@type": "DataDownload",
+          "encodingFormat": "application/json",
+          "name": "Stats API",
+          "contentUrl": "https://dht44.com/api/stats"
+        },
+        {
+          "@type": "DataDownload",
+          "encodingFormat": "application/json",
+          "name": "Peers API",
+          "contentUrl": "https://dht44.com/api/peers"
+        },
+        {
+          "@type": "DataDownload",
+          "encodingFormat": "application/json",
+          "name": "Country breakdown",
+          "contentUrl": "https://dht44.com/api/country-stats"
+        },
+        {
+          "@type": "DataDownload",
+          "encodingFormat": "application/json",
+          "name": "Client breakdown",
+          "contentUrl": "https://dht44.com/api/client-stats"
+        }
+      ]
+    }
+    </script>
+
   </head>
   <body>
     <div id="root"></div>
@@ -40,20 +114,90 @@
     <noscript>
       <header style="font-family: ui-monospace, monospace; max-width: 760px; margin: 40px auto; padding: 0 18px; color: #d8dee6;">
         <h1 style="color: #8fc0ff;">dht44 — Live BitTorrent Mainline DHT Dashboard</h1>
+
+        <!--# include virtual="/api/snapshot.html" -->
+
         <p>
-          Real-time observation of the public Mainline DHT: live peer
-          counts, query rates, BEP 51 infohash sampling, classifier
-          scores, and a 3D peer-graph. Open-source MIT C toolkit.
+          Real-time observation of the public BitTorrent Mainline DHT.
+          The dashboard is a single-page React app — the interactive
+          peer / queries / infohashes / bep44 / 3D graph tabs require
+          JavaScript. Below is a static description of what the page
+          presents and links into the parts of the site that don't
+          need JS.
         </p>
+
+        <h2 style="color: #8fc0ff;">What this page tracks</h2>
+        <ul>
+          <li>
+            <strong>Peer counts</strong> — total unique <code>(ip, port)</code>
+            observed since the observation database opened, split by IPv4
+            and IPv6, plus liveness windows (alive in last 6 hours, last 24
+            hours, stale beyond that). IPs are redacted to <code>/24</code>
+            (IPv4) and <code>/48</code> (IPv6) before any exposure.
+          </li>
+          <li>
+            <strong>Query rate</strong> — DHT KRPC traffic observed in the
+            last 60 seconds: <code>ping</code>, <code>find_node</code>,
+            <code>get_peers</code>, <code>announce_peer</code>, plus BEP 51
+            <code>sample_infohashes</code>.
+          </li>
+          <li>
+            <strong>Top BitTorrent clients</strong> — distribution by BEP 20
+            v-string prefix. Commonly libtorrent, µTorrent, qBittorrent,
+            Transmission, Deluge, XD, JC, plus a long tail of forks and
+            embedded clients.
+          </li>
+          <li>
+            <strong>Top peer countries</strong> — GeoIP attribution via
+            MaxMind GeoLite2. Typically led by China, United States, Japan,
+            Taiwan, France, Russia, Netherlands, Canada, Spain, United
+            Kingdom, India, Germany, South Korea, Brazil, Hong Kong.
+          </li>
+          <li>
+            <strong>Infohash discovery sources</strong> — how each infohash
+            was first seen: <code>get_peers</code> query (asked-about),
+            BEP 51 <code>sample_infohashes</code> response, or as a
+            <code>find_node</code> target.
+          </li>
+          <li>
+            <strong>Multi-signal classifier</strong> — per-peer label of
+            <em>ok</em> / <em>crawler</em> / <em>monitor</em> /
+            <em>honeypot</em>, derived from reply ratio, BEP 42 secure-id
+            check, BEP 51 support, and v-string anomalies.
+          </li>
+          <li>
+            <strong>Peer graph</strong> — 3D force-directed visualization of
+            who returns whom in <code>find_node</code> replies, restricted
+            to the top-N internally-connected nodes by in-result degree.
+          </li>
+          <li>
+            <strong>Uptime</strong> — time since the first peer observation
+            in the current observation database. The crawler runs
+            continuously; the database persists across daemon restarts.
+          </li>
+        </ul>
+
+        <h2 style="color: #8fc0ff;">JSON APIs (no JavaScript required)</h2>
         <p>
-          The interactive dashboard requires JavaScript. The protocol
-          reference and library docs work without it:
+          Every panel above is backed by a JSON endpoint. Crawlers and
+          scripts can read the live data directly:
         </p>
         <ul>
+          <li><a href="/api/stats"><code>/api/stats</code></a> — top-line counts and rates</li>
+          <li><a href="/api/peers"><code>/api/peers</code></a> — observed peers with geo + classifier</li>
+          <li><a href="/api/queries"><code>/api/queries</code></a> — recent KRPC queries</li>
+          <li><a href="/api/infohashes"><code>/api/infohashes</code></a> — observed infohashes with discovery source</li>
+          <li><a href="/api/country-stats"><code>/api/country-stats</code></a> — peer count by ISO 2-letter country</li>
+          <li><a href="/api/client-stats"><code>/api/client-stats</code></a> — peer count by BEP 20 v-string</li>
+          <li><a href="/api/graph"><code>/api/graph</code></a> — peer graph nodes + links</li>
+        </ul>
+
+        <h2 style="color: #8fc0ff;">Read more (no JavaScript required)</h2>
+        <ul>
           <li><a href="/intro">About the project</a></li>
-          <li><a href="/protocol">Protocol reference (Kademlia, BEP 5, BEP 44, BEP 51)</a></li>
+          <li><a href="/protocol">Protocol reference: Kademlia, BEP 5, BEP 44, BEP 51</a></li>
           <li><a href="/lib">libbep44 — embeddable C library</a></li>
-          <li><a href="/blog">Blog: DHT size, classifying peers, embedding the daemon</a></li>
+          <li><a href="/blog">Blog: DHT size, classifying peers, embedding the daemon, Kademlia vs Chord</a></li>
           <li><a href="https://github.com/01BTC10/dht44">Source on GitHub</a></li>
         </ul>
       </header>

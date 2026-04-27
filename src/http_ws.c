@@ -725,6 +725,122 @@ static const char BUILTIN_INDEX[] =
 "</script></body></html>\n";
 
 /* ============================================================
+ * Live snapshot for SEO crawlers (HTML, not JSON)
+ *
+ * Returns a small chunk of HTML — top-line counts + top countries +
+ * top clients — meant to be inlined into the SPA's <noscript> block
+ * via nginx Server-Side Includes (SSI). Crawlers that don't render
+ * JavaScript (Bingbot, DuckDuckBot, AI scrapers, archive crawlers)
+ * see real numbers instead of an empty SPA shell. JS-enabled clients
+ * never see this — the host noscript block hides it.
+ * ============================================================ */
+
+#define APPEND_HTML(...) do { \
+    int _n = snprintf(buf + len, cap - len, __VA_ARGS__); \
+    if (_n < 0) break; \
+    if ((size_t)_n >= cap - len) { \
+        while ((size_t)_n >= cap - len) cap *= 2; \
+        char *_nb = realloc(buf, cap); \
+        if (!_nb) break; \
+        buf = _nb; \
+        _n = snprintf(buf + len, cap - len, __VA_ARGS__); \
+    } \
+    len += (size_t)_n; \
+} while (0)
+
+static char *
+snapshot_html(void)
+{
+    char *stats_json   = db_select_stats_json();
+    char *country_json = country_stats_json(15);
+    char *client_json  = db_select_client_stats_json(12);
+
+    json_error_t err;
+    json_t *jstats   = stats_json   ? json_loads(stats_json,   0, &err) : NULL;
+    json_t *jcountry = country_json ? json_loads(country_json, 0, &err) : NULL;
+    json_t *jclient  = client_json  ? json_loads(client_json,  0, &err) : NULL;
+    free(stats_json); free(country_json); free(client_json);
+
+    size_t cap = 4096, len = 0;
+    char *buf = malloc(cap);
+    if (!buf) goto cleanup;
+
+    APPEND_HTML("<section class=\"snapshot\">\n");
+
+    if (jstats) {
+        int64_t peers = json_integer_value(json_object_get(jstats, "peers"));
+        int64_t v4    = json_integer_value(json_object_get(jstats, "peers_v4"));
+        int64_t v6    = json_integer_value(json_object_get(jstats, "peers_v6"));
+        int64_t qrs   = json_integer_value(json_object_get(jstats, "queries"));
+        int64_t ihs   = json_integer_value(json_object_get(jstats, "infohashes"));
+        int64_t qpm   = json_integer_value(json_object_get(jstats, "queries_per_min"));
+        int64_t first = json_integer_value(json_object_get(jstats, "db_first_seen"));
+        int64_t now   = (int64_t)time(NULL);
+        int64_t up    = (first > 0) ? now - first : 0;
+
+        APPEND_HTML("<h3>Live snapshot</h3>\n<dl>\n");
+        APPEND_HTML("  <dt>peers</dt><dd>%lld observed (v4 %lld &middot; v6 %lld)</dd>\n",
+                    (long long)peers, (long long)v4, (long long)v6);
+        APPEND_HTML("  <dt>queries</dt><dd>%lld total &middot; %lld/min</dd>\n",
+                    (long long)qrs, (long long)qpm);
+        APPEND_HTML("  <dt>infohashes</dt><dd>%lld</dd>\n", (long long)ihs);
+        if (up > 0) {
+            int dy = (int)(up / 86400);
+            int hr = (int)((up % 86400) / 3600);
+            int mn = (int)((up % 3600) / 60);
+            if (dy)      APPEND_HTML("  <dt>uptime</dt><dd>%dd %dh</dd>\n", dy, hr);
+            else if (hr) APPEND_HTML("  <dt>uptime</dt><dd>%dh %dm</dd>\n", hr, mn);
+            else         APPEND_HTML("  <dt>uptime</dt><dd>%dm</dd>\n", mn);
+        }
+        APPEND_HTML("</dl>\n");
+    }
+
+    if (jcountry) {
+        json_t *arr = json_object_get(jcountry, "countries");
+        if (arr && json_is_array(arr) && json_array_size(arr) > 0) {
+            APPEND_HTML("<h3>Top peer countries</h3>\n<ul>\n");
+            size_t i;
+            json_t *o;
+            json_array_foreach(arr, i, o) {
+                if (i >= 15) break;
+                const char *iso = json_string_value(json_object_get(o, "iso"));
+                int64_t cnt = json_integer_value(json_object_get(o, "count"));
+                if (iso) APPEND_HTML("  <li>%s &middot; %lld</li>\n",
+                                     iso, (long long)cnt);
+            }
+            APPEND_HTML("</ul>\n");
+        }
+    }
+
+    if (jclient) {
+        json_t *arr = json_object_get(jclient, "clients");
+        if (arr && json_is_array(arr) && json_array_size(arr) > 0) {
+            APPEND_HTML("<h3>Top BitTorrent clients (BEP 20 v-string prefixes)</h3>\n<ul>\n");
+            size_t i;
+            json_t *o;
+            json_array_foreach(arr, i, o) {
+                if (i >= 12) break;
+                const char *vs = json_string_value(json_object_get(o, "v_string"));
+                int64_t cnt = json_integer_value(json_object_get(o, "count"));
+                if (vs) APPEND_HTML("  <li><code>%s</code> &middot; %lld</li>\n",
+                                    vs, (long long)cnt);
+            }
+            APPEND_HTML("</ul>\n");
+        }
+    }
+
+    APPEND_HTML("</section>\n");
+
+cleanup:
+    if (jstats)   json_decref(jstats);
+    if (jcountry) json_decref(jcountry);
+    if (jclient)  json_decref(jclient);
+    return buf;
+}
+
+#undef APPEND_HTML
+
+/* ============================================================
  * Context + protocols
  * ============================================================ */
 
@@ -881,6 +997,14 @@ dispatch_http(struct lws *wsi)
         char body[80];
         snprintf(body, sizeof(body), "{\"node_id\":\"%s\"}", hex);
         return send_json_response(wsi, body);
+    }
+    if (strcmp(uri, "/api/snapshot.html") == 0) {
+        char *body = snapshot_html();
+        int rc = send_text_response(wsi, HTTP_STATUS_OK,
+                                    "text/html; charset=utf-8",
+                                    body ? body : "<!-- snapshot unavailable -->");
+        free(body);
+        return rc;
     }
 
     return lws_return_http_status(wsi, 404, NULL);
