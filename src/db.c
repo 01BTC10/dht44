@@ -11,6 +11,8 @@
 #include <string.h>
 #include <time.h>
 
+#include "redact.h"
+
 static sqlite3 *g_db            = NULL;
 static int      g_tx_open       = 0;
 static time_t   g_tx_opened_at  = 0;
@@ -412,7 +414,13 @@ row_peer(sqlite3_stmt *s, void *ctx)
 {
     (void)ctx;
     json_t *o = json_object();
-    json_object_set_new(o, "ip",   json_string((const char *)sqlite3_column_text(s, 0)));
+    const char *ip_raw = (const char *)sqlite3_column_text(s, 0);
+    char ip_red[64];
+    if (ip_raw && redact_ip(ip_raw, ip_red, sizeof(ip_red)) == 0) {
+        json_object_set_new(o, "ip", json_string(ip_red));
+    } else {
+        json_object_set_new(o, "ip", json_string(ip_raw ? ip_raw : ""));
+    }
     json_object_set_new(o, "port", json_integer(sqlite3_column_int(s, 1)));
     json_set_blob_hex(o, "node_id",  sqlite3_column_blob(s, 2), sqlite3_column_bytes(s, 2));
     json_set_blob_hex(o, "v_string", sqlite3_column_blob(s, 3), sqlite3_column_bytes(s, 3));
@@ -450,7 +458,15 @@ row_query(sqlite3_stmt *s, void *ctx)
     (void)ctx;
     json_t *o = json_object();
     json_object_set_new(o, "ts",        json_integer(sqlite3_column_int64(s, 0)));
-    json_object_set_new(o, "ip",        json_string((const char *)sqlite3_column_text(s, 1)));
+    {
+        const char *ip_raw = (const char *)sqlite3_column_text(s, 1);
+        char ip_red[64];
+        if (ip_raw && redact_ip(ip_raw, ip_red, sizeof(ip_red)) == 0) {
+            json_object_set_new(o, "ip", json_string(ip_red));
+        } else {
+            json_object_set_new(o, "ip", json_string(ip_raw ? ip_raw : ""));
+        }
+    }
     json_object_set_new(o, "port",      json_integer(sqlite3_column_int(s, 2)));
     json_object_set_new(o, "direction", json_string((const char *)sqlite3_column_text(s, 3)));
     json_object_set_new(o, "y",         json_string((const char *)sqlite3_column_text(s, 4)));
@@ -943,11 +959,14 @@ db_select_graph_json(int limit)
     json_t *nodes = json_array();
     for (int i = 0; i < cand_n; i++) {
         if (!cands[i].keep) continue;
-        char id[INET_ADDRSTRLEN + 8];
-        snprintf(id, sizeof(id), "%s:%d", cands[i].ip, cands[i].port);
+        char ip_red[64];
+        const char *ip_out = cands[i].ip;
+        if (redact_ip(cands[i].ip, ip_red, sizeof(ip_red)) == 0) ip_out = ip_red;
+        char id[80];
+        snprintf(id, sizeof(id), "%s:%d", ip_out, cands[i].port);
         json_t *o = json_object();
         json_object_set_new(o, "id",   json_string(id));
-        json_object_set_new(o, "ip",   json_string(cands[i].ip));
+        json_object_set_new(o, "ip",   json_string(ip_out));
         json_object_set_new(o, "port", json_integer(cands[i].port));
         /* "deg" reports the in-result degree — what the user actually sees. */
         json_object_set_new(o, "deg",  json_integer(cands[i].internal_deg));

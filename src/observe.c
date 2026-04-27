@@ -11,6 +11,7 @@
 #include "bencode.h"
 #include "db.h"
 #include "dht_wrap.h"
+#include "redact.h"
 
 #define TAG "[dht44:observe] "
 
@@ -55,7 +56,12 @@ peer_json(json_t *o, const struct sockaddr *peer)
         inet_ntop(AF_INET6, &p->sin6_addr, ip, sizeof(ip));
         port = ntohs(p->sin6_port);
     }
-    json_object_set_new(o, "ip",   json_string(ip));
+    char redacted[64];
+    if (redact_ip(ip, redacted, sizeof(redacted)) == 0) {
+        json_object_set_new(o, "ip", json_string(redacted));
+    } else {
+        json_object_set_new(o, "ip", json_string(ip));
+    }
     json_object_set_new(o, "port", json_integer(port));
 }
 

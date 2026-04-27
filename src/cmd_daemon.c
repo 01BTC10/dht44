@@ -40,6 +40,7 @@
 #include "ipc.h"
 #include "lookup.h"
 #include "observe.h"
+#include "redact.h"
 #include "state.h"
 #include "upnp.h"
 
@@ -76,6 +77,7 @@ typedef struct {
     const char *web_static;         /* NULL = built-in UI */
     const char *geoip_city;         /* NULL = none */
     const char *geoip_asn;          /* NULL = none */
+    int      web_show_full_ips;     /* 0 = redact (default), 1 = show full */
 } daemon_args;
 
 static const char USAGE_DAEMON[] =
@@ -87,7 +89,8 @@ static const char USAGE_DAEMON[] =
     "                    [--liveness-window-hours H] [--liveness-pps N]\n"
     "                    [--prune-days D]\n"
     "                    [--web PORT] [--web-static DIR]\n"
-    "                    [--geoip-city PATH] [--geoip-asn PATH]\n";
+    "                    [--geoip-city PATH] [--geoip-asn PATH]\n"
+    "                    [--web-show-full-ips]   (default: redact to /24, /48)\n";
 
 static int
 parse_args(int argc, char **argv, daemon_args *a)
@@ -145,6 +148,8 @@ parse_args(int argc, char **argv, daemon_args *a)
             a->geoip_city = argv[++i];
         } else if (strcmp(argv[i], "--geoip-asn") == 0 && i + 1 < argc) {
             a->geoip_asn = argv[++i];
+        } else if (strcmp(argv[i], "--web-show-full-ips") == 0) {
+            a->web_show_full_ips = 1;
         } else {
             fputs(USAGE_DAEMON, stderr);
             return -1;
@@ -1314,6 +1319,16 @@ cmd_daemon(int argc, char **argv)
         }
     }
     if (g_args.web_port > 0) {
+        /* Default-on IP redaction so a public-facing dashboard doesn't leak
+         * full peer addresses. Operator opts out with --web-show-full-ips. */
+        redact_set_enabled(g_args.web_show_full_ips ? 0 : 1);
+        if (g_args.web_show_full_ips) {
+            fprintf(stderr, "[dht44:daemon] WARNING: --web-show-full-ips on; "
+                            "API will expose full peer IPs\n");
+        } else {
+            fprintf(stderr, "[dht44:daemon] redacting peer IPs in API output "
+                            "(IPv4 /24, IPv6 /48). Use --web-show-full-ips to disable.\n");
+        }
         http_ws_init(g_args.web_port, g_args.web_static);
         /* Auto-discover GeoIP DBs at $DHT44_HOME/geoip/{city,asn}-lite.mmdb
          * if the user didn't pass --geoip-* explicitly. The /api/peers
