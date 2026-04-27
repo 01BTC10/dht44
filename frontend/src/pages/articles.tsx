@@ -31,62 +31,9 @@ const techArticle = (path: string, title: string, desc: string,
 
 export { default as Kademlia } from "./articles/Kademlia";
 
-export const Bep5 = () => (
-  <ArticleStub
-    title="BitTorrent's Mainline DHT (BEP 5) in One Page"
-    description="The four KRPC queries (ping, find_node, get_peers, announce_peer); bencode framing; transaction IDs; node ID generation; bootstrap routers."
-    path="/protocol/bep5"
-    crumbs={[
-      { label: "Home", to: "/" },
-      { label: "Protocol", to: "/protocol" },
-      { label: "BEP 5" },
-    ]}
-    jsonLd={techArticle(
-      "/protocol/bep5",
-      "BitTorrent's Mainline DHT (BEP 5) in One Page",
-      "Field guide to the Mainline DHT KRPC protocol.",
-      "bep 5, bittorrent dht, krpc, find_node, get_peers, announce_peer",
-    )}
-  />
-);
-
-export const Bep44 = () => (
-  <ArticleStub
-    title="BEP 44 Mutable & Immutable DHT Items, In Depth"
-    description="The full BEP 44 wire format: SHA1(pk‖salt) targeting, Ed25519 signing, seq monotonicity, CAS, and republish — with sign/verify examples in C."
-    path="/protocol/bep44"
-    crumbs={[
-      { label: "Home", to: "/" },
-      { label: "Protocol", to: "/protocol" },
-      { label: "BEP 44" },
-    ]}
-    jsonLd={techArticle(
-      "/protocol/bep44",
-      "BEP 44 Mutable & Immutable DHT Items, In Depth",
-      "How signed mutable items and immutable items work on the BitTorrent DHT.",
-      "bep 44, bittorrent dht, mutable items, ed25519, sha1, cas, sequence number",
-    )}
-  />
-);
-
-export const Bep51 = () => (
-  <ArticleStub
-    title="BEP 51 sample_infohashes — Enumerating the BitTorrent DHT"
-    description="How an active crawler walks the DHT keyspace using sample_infohashes, with rate limits and dedup strategies."
-    path="/protocol/bep51"
-    crumbs={[
-      { label: "Home", to: "/" },
-      { label: "Protocol", to: "/protocol" },
-      { label: "BEP 51" },
-    ]}
-    jsonLd={techArticle(
-      "/protocol/bep51",
-      "BEP 51 sample_infohashes — Enumerating the BitTorrent DHT",
-      "Active DHT crawling via BEP 51's sample_infohashes query.",
-      "bep 51, sample_infohashes, dht crawler, bittorrent",
-    )}
-  />
-);
+export { default as Bep5  } from "./articles/Bep5";
+export { default as Bep44 } from "./articles/Bep44";
+export { default as Bep51 } from "./articles/Bep51";
 
 /* ===== /lib/* ===== */
 
