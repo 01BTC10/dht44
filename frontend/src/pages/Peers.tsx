@@ -29,7 +29,7 @@ type SourceBucket = { source: string; count: number };
 type ClientBucket  = { v_string: string | null; count: number };
 type CountryBucket = { iso: string; count: number };
 
-const ALL_CLASSES: CrawlerClass[] = ["ok", "crawler", "monitor", "honeypot"];
+const ALL_CLASSES: CrawlerClass[] = ["ok", "seedbox", "crawler", "monitor", "honeypot"];
 const PAGE_SIZES = [50, 100, 250, 500, 1000];
 
 export default function Peers() {

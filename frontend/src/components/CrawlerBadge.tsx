@@ -2,10 +2,15 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { HoverPause } from "./HoverPause";
 
-export type CrawlerClass = "ok" | "crawler" | "monitor" | "honeypot";
+export type CrawlerClass = "ok" | "seedbox" | "crawler" | "monitor" | "honeypot";
 
 const STYLES: Record<CrawlerClass, { bg: string; fg: string; border: string; label: string }> = {
   ok:       { bg: "transparent", fg: "transparent", border: "transparent", label: "" },
+  /* seedbox: clean datacenter / hosting peer with a real client and
+   * no crawler-shaped signals. Informative, not a suspicion — picked
+   * a calm cyan instead of the warm warning palette used by the
+   * other tags. */
+  seedbox:  { bg: "#1a3036", fg: "#7cd0d8", border: "#3e8a92", label: "seedbox?" },
   crawler:  { bg: "#3a2230", fg: "#ff9bb5", border: "#8a3e54", label: "crawler?" },
   monitor:  { bg: "#3a2e1a", fg: "#ffc578", border: "#8a6a2e", label: "monitor?" },
   honeypot: { bg: "#3a1a1a", fg: "#ff7878", border: "#8a2e2e", label: "honeypot?" },

@@ -329,8 +329,17 @@ classify_peer(json_t *row, json_t *geo)
     reason[0] = 0;
     char tmp[160];
 
+    /* Track which signals fired so the class assignment below can decide
+     * "this peer's signals are explained by being a seedbox / VPS user
+     * rather than a crawler". Avoids re-checking each condition twice. */
+    int sig_silent_taker = 0;
+    int sig_read_only    = 0;
+    int sig_asym_in      = 0;
+    int sig_no_v_string  = 0;
+
     if (as_dst == 0 && as_src >= 50) {
         score += 2;
+        sig_silent_taker = 1;
         json_array_append_new(signals, json_string("silent_taker"));
         snprintf(tmp, sizeof(tmp),
                  "returned %lld distinct peers in find_node replies but"
@@ -354,7 +363,10 @@ classify_peer(json_t *row, json_t *geo)
                  (long long)same_ip);
         append_reason(reason, sizeof(reason), &rused, tmp);
     } else if (same_ip >= 3) {
-        score += 1;
+        /* port_farm_mild is informational only — 3+ ports on one IP is
+         * the normal NAT'd household / multi-client case. Reported in
+         * the signal list so users can still see it, but no longer
+         * contributes to the score (was +1, dropped to 0). */
         json_array_append_new(signals, json_string("port_farm_mild"));
         snprintf(tmp, sizeof(tmp),
                  "%lld distinct ports on this IP (multi-client / NAT)",
@@ -364,6 +376,7 @@ classify_peer(json_t *row, json_t *geo)
 
     if (json_is_integer(ro_v) && json_integer_value(ro_v) == 1) {
         score += 2;
+        sig_read_only = 1;
         json_array_append_new(signals, json_string("read_only"));
         append_reason(reason, sizeof(reason), &rused,
                       "advertises BEP 5 read-only (won't respond)");
@@ -379,6 +392,7 @@ classify_peer(json_t *row, json_t *geo)
 
     if (qin >= 100 && qin >= 5 * (qout > 0 ? qout : 1)) {
         score += 2;
+        sig_asym_in = 1;
         json_array_append_new(signals, json_string("asymmetric_in"));
         snprintf(tmp, sizeof(tmp),
                  "queries us heavily while we rarely query them back"
@@ -389,12 +403,14 @@ classify_peer(json_t *row, json_t *geo)
 
     if ((!v_str || json_is_null(v_str)) && (qin + qout) >= 20) {
         score += 1;
+        sig_no_v_string = 1;
         json_array_append_new(signals, json_string("no_v_string"));
         append_reason(reason, sizeof(reason), &rused,
                       "no client identifier, frequent traffic");
     }
 
     const char *mon = match_keyword(org, MONITOR_ASN_KEYWORDS);
+    int is_dc = match_keyword(org, DC_ASN_KEYWORDS) != NULL;
     if (mon) {
         score += 4;
         snprintf(tmp, sizeof(tmp), "monitor_asn:%s", org ? org : mon);
@@ -402,7 +418,7 @@ classify_peer(json_t *row, json_t *geo)
         snprintf(tmp, sizeof(tmp),
                  "ASN matches known anti-piracy operator: %s", org ? org : mon);
         append_reason(reason, sizeof(reason), &rused, tmp);
-    } else if (match_keyword(org, DC_ASN_KEYWORDS) && same_ip >= 5) {
+    } else if (is_dc && same_ip >= 5) {
         score += 1;
         snprintf(tmp, sizeof(tmp), "dc_asn:%s", org);
         json_array_append_new(signals, json_string(tmp));
@@ -412,11 +428,31 @@ classify_peer(json_t *row, json_t *geo)
         append_reason(reason, sizeof(reason), &rused, tmp);
     }
 
+    /* "seedbox" pattern: peer is on a known datacenter / hosting ASN, has
+     * a real client identifier, and shows none of the crawler-shaped
+     * signals (not silent, not asymmetric inbound, doesn't advertise
+     * read-only, has v_string, isn't on an anti-piracy ASN). When this
+     * is true AND the peer would otherwise be tagged crawler/monitor by
+     * raw score, label it "seedbox" instead — informative, not a
+     * suspicion. Peers with no signals at all stay "ok" (no badge). */
+    int is_seedbox_like = is_dc && !mon
+                        && v_str && !json_is_null(v_str)
+                        && !sig_silent_taker
+                        && !sig_asym_in
+                        && !sig_read_only
+                        && !sig_no_v_string;
+
+    /* Class thresholds. Tightened crawler floor from score>=1 to >=2 so
+     * a single weak signal (bep42_bad alone, port_farm_mild) doesn't
+     * label a peer as suspect. honeypot still requires score>=5; that
+     * floor catches monitor_asn (+4) plus any other signal, and stacked
+     * crawler-shaped behaviors. */
     const char *cls;
-    if      (score >= 5) cls = "honeypot";
-    else if (score >= 3) cls = "monitor";
-    else if (score >= 1) cls = "crawler";
-    else                 cls = "ok";
+    if      (score >= 5)        cls = "honeypot";
+    else if (is_seedbox_like && score >= 2) cls = "seedbox";
+    else if (score >= 3)        cls = "monitor";
+    else if (score >= 2)        cls = "crawler";
+    else                        cls = "ok";
 
     json_object_set_new(row, "crawler_score",   json_integer(score));
     json_object_set_new(row, "crawler_class",   json_string(cls));

@@ -137,7 +137,7 @@ export default function Graph() {
   type FamilyFilter = "all" | "v4" | "v6";
   const [aliveFilter,  setAliveFilter]  = useState<AliveFilter>("all");
   const [familyFilter, setFamilyFilter] = useState<FamilyFilter>("all");
-  const ALL_CLASSES: CrawlerClass[] = ["ok", "crawler", "monitor", "honeypot"];
+  const ALL_CLASSES: CrawlerClass[] = ["ok", "seedbox", "crawler", "monitor", "honeypot"];
   const [classFilter, setClassFilter] = useState<Set<CrawlerClass>>(new Set(ALL_CLASSES));
   const [bep51Only,   setBep51Only]   = useState(false);
   const [search, setSearch]   = useState("");
