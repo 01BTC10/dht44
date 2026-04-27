@@ -1,91 +1,63 @@
-import { useEffect, useState } from "react";
-import { stream } from "./ws";
-import Peers from "./pages/Peers";
-import Queries from "./pages/Queries";
+import { Routes, Route, Navigate } from "react-router-dom";
+
+import SiteShell      from "./components/SiteShell";
+import DashboardShell from "./components/DashboardShell";
+
+import Home         from "./pages/Home";
+import About        from "./pages/About";
+import ProtocolHub  from "./pages/ProtocolHub";
+import LibLanding   from "./pages/LibLanding";
+import BlogIndex    from "./pages/BlogIndex";
+import NotFound     from "./pages/NotFound";
+
+import {
+  Kademlia, Bep5, Bep44 as Bep44Article, Bep51,
+  LibQuickstart, LibApi, LibPersistence,
+  BlogDhtSize, BlogClassifyingPeers, BlogEmbedDht, BlogKademliaVsChord,
+} from "./pages/articles";
+
+/* Existing dashboard tab pages — content unchanged. */
+import Peers      from "./pages/Peers";
+import Queries    from "./pages/Queries";
 import Infohashes from "./pages/Infohashes";
-import Bep44 from "./pages/Bep44";
-import Graph from "./pages/Graph";
-
-type Stats = {
-  peers: number; peers_v4?: number; peers_v6?: number;
-  peers_alive_6h?: number; peers_alive_24h?: number; peers_stale?: number;
-  queries: number; infohashes: number;
-  bep44_items: number; queries_per_min: number;
-};
-
-type Tab = "peers" | "queries" | "infohashes" | "bep44" | "graph";
+import Bep44Tab   from "./pages/Bep44";
+import Graph      from "./pages/Graph";
 
 export default function App() {
-  const [tab, setTab] = useState<Tab>("peers");
-  const [up, setUp]   = useState(false);
-  const [stats, setStats] = useState<Stats | null>(null);
-
-  useEffect(() => {
-    stream.onStatus = setUp;
-    fetch("/api/stats").then(r => r.json()).then(setStats).catch(() => {});
-    return stream.subscribe((topic, data) => {
-      if (topic === "stats") setStats(data as Stats);
-    });
-  }, []);
-
   return (
-    <div className="app">
-      <header>
-        <h1>dht44 crawler</h1>
-        <span className={"badge-live" + (up ? " on" : "")}>●</span>
-        <span className="small">{up ? "connected" : "reconnecting…"}</span>
-      </header>
-      {stats && (
-        <div className="stats">
-          <div title="unique (ip, port) peers observed (cumulative since db opened)">
-            <b>peers</b>{stats.peers.toLocaleString()}
-            {(stats.peers_v4 != null || stats.peers_v6 != null) && (
-              <span className="small" style={{ marginLeft: 6 }}>
-                (v4:{(stats.peers_v4 ?? 0).toLocaleString()}
-                {" "}· v6:{(stats.peers_v6 ?? 0).toLocaleString()})
-              </span>
-            )}
-          </div>
-          {stats.peers_alive_6h != null && (
-            <div title="peers whose last_seen is within the last 6 hours"
-                 style={{ color: "#9be88a" }}>
-              <b>alive 6h</b>{stats.peers_alive_6h.toLocaleString()}
-            </div>
-          )}
-          {stats.peers_alive_24h != null && (
-            <div title="peers whose last_seen is within the last 24 hours"
-                 style={{ color: "#cfd66c" }}>
-              <b>alive 24h</b>{stats.peers_alive_24h.toLocaleString()}
-            </div>
-          )}
-          {stats.peers_stale != null && (
-            <div title="peers not seen in over 24h (sweeper still re-pings until --prune-days)"
-                 style={{ color: "#a0a8b0" }}>
-              <b>stale</b>{stats.peers_stale.toLocaleString()}
-            </div>
-          )}
-          <div><b>queries</b>{stats.queries.toLocaleString()}</div>
-          <div><b>infohashes</b>{stats.infohashes.toLocaleString()}</div>
-          <div><b>bep44</b>{stats.bep44_items.toLocaleString()}</div>
-          <div><b>rate</b>{stats.queries_per_min}/min</div>
-        </div>
-      )}
-      <nav className="tabs">
-        {(["peers", "queries", "infohashes", "bep44", "graph"] as Tab[]).map(t => (
-          <button
-            key={t}
-            className={tab === t ? "active" : ""}
-            onClick={() => setTab(t)}
-          >
-            {t}
-          </button>
-        ))}
-      </nav>
-      {tab === "peers"      && <Peers />}
-      {tab === "queries"    && <Queries />}
-      {tab === "infohashes" && <Infohashes />}
-      {tab === "bep44"      && <Bep44 />}
-      {tab === "graph"      && <Graph />}
-    </div>
+    <Routes>
+      <Route element={<SiteShell />}>
+        <Route path="/"               element={<Home />} />
+        <Route path="/about"          element={<About />} />
+
+        <Route path="/protocol"           element={<ProtocolHub />} />
+        <Route path="/protocol/kademlia"  element={<Kademlia />} />
+        <Route path="/protocol/bep5"      element={<Bep5 />} />
+        <Route path="/protocol/bep44"     element={<Bep44Article />} />
+        <Route path="/protocol/bep51"     element={<Bep51 />} />
+
+        <Route path="/lib"              element={<LibLanding />} />
+        <Route path="/lib/quickstart"   element={<LibQuickstart />} />
+        <Route path="/lib/api"          element={<LibApi />} />
+        <Route path="/lib/persistence"  element={<LibPersistence />} />
+
+        <Route path="/blog"                       element={<BlogIndex />} />
+        <Route path="/blog/dht-size"              element={<BlogDhtSize />} />
+        <Route path="/blog/classifying-peers"     element={<BlogClassifyingPeers />} />
+        <Route path="/blog/embed-dht-c-app"       element={<BlogEmbedDht />} />
+        <Route path="/blog/kademlia-vs-chord"     element={<BlogKademliaVsChord />} />
+      </Route>
+
+      <Route path="/dashboard" element={<DashboardShell />}>
+        <Route index                element={<Navigate to="peers" replace />} />
+        <Route path="peers"         element={<Peers />} />
+        <Route path="queries"       element={<Queries />} />
+        <Route path="infohashes"    element={<Infohashes />} />
+        <Route path="bep44"         element={<Bep44Tab />} />
+        <Route path="graph"         element={<Graph />} />
+      </Route>
+
+      <Route path="*" element={<NotFound />} />
+    </Routes>
   );
 }

@@ -5,13 +5,15 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc --noEmit && vite build",
+    "build": "tsc --noEmit && vite build && node scripts/generate-sitemap.mjs",
     "preview": "vite preview"
   },
   "dependencies": {
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "react-force-graph-3d": "^1.29.1"
+    "react-force-graph-3d": "^1.29.1",
+    "react-helmet-async": "^3.0.0",
+    "react-router-dom": "^7.14.2"
   },
   "devDependencies": {
     "@types/react": "^18.3.3",
