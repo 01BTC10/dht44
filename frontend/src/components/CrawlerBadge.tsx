@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { HoverPause } from "./HoverPause";
 
@@ -35,6 +35,11 @@ function prettySignal(raw: string): string {
 const POP_W = 360;
 const POP_GAP = 6;
 
+// Delay before closing the popup after the cursor leaves both the badge
+// and the popup itself. Lets the cursor traverse the 6px gap between
+// them without flicker, and absorbs micro-jitter on re-render.
+const CLOSE_DELAY_MS = 140;
+
 export function CrawlerBadge(
   { cls, score, signals, reason }:
   { cls: CrawlerClass; score: number; signals: string[]; reason: string },
@@ -42,9 +47,39 @@ export function CrawlerBadge(
   const [open, setOpen] = useState(false);
   const [pos, setPos] = useState<{ top: number; left: number; placement: "below" | "above" } | null>(null);
   const badgeRef = useRef<HTMLSpanElement | null>(null);
+  const closeTimer = useRef<number | null>(null);
 
+  const cancelClose = () => {
+    if (closeTimer.current != null) {
+      window.clearTimeout(closeTimer.current);
+      closeTimer.current = null;
+    }
+  };
+  const requestOpen  = () => { cancelClose(); setOpen(true); };
+  const requestClose = () => {
+    cancelClose();
+    closeTimer.current = window.setTimeout(() => {
+      setOpen(false);
+      closeTimer.current = null;
+    }, CLOSE_DELAY_MS);
+  };
+
+  // Cleanup on unmount — important because the popup is portaled to
+  // document.body and would outlive a row that gets removed by a live
+  // refresh otherwise.
+  useEffect(() => () => cancelClose(), []);
+
+  // Re-measure the popup position on every render while open. The
+  // table re-renders every 5s under live updates; even with same-key
+  // reconciliation, the badge's DOM rect can shift if rows above it
+  // change height. Without re-measure, the popup ends up detached
+  // from the badge after the first refresh. The setPos guard avoids
+  // a render loop when the rect didn't actually change.
   useLayoutEffect(() => {
-    if (!open || !badgeRef.current) { setPos(null); return; }
+    if (!open || !badgeRef.current) {
+      if (pos !== null) setPos(null);
+      return;
+    }
     const r = badgeRef.current.getBoundingClientRect();
     const vw = window.innerWidth;
     const vh = window.innerHeight;
@@ -52,8 +87,10 @@ export function CrawlerBadge(
     const spaceBelow = vh - r.bottom;
     const placement: "below" | "above" = spaceBelow < 200 ? "above" : "below";
     const top = placement === "below" ? r.bottom + POP_GAP : r.top - POP_GAP;
-    setPos({ top, left, placement });
-  }, [open]);
+    if (!pos || pos.top !== top || pos.left !== left || pos.placement !== placement) {
+      setPos({ top, left, placement });
+    }
+  });
 
   if (cls === "ok") return null;
   const s = STYLES[cls];
@@ -62,8 +99,8 @@ export function CrawlerBadge(
     <HoverPause style={{ marginLeft: 6, display: "inline-block" }}>
       <span
         ref={badgeRef}
-        onMouseEnter={() => setOpen(true)}
-        onMouseLeave={() => setOpen(false)}
+        onMouseEnter={requestOpen}
+        onMouseLeave={requestClose}
         style={{
           padding: "1px 5px",
           background: s.bg,
@@ -78,8 +115,8 @@ export function CrawlerBadge(
       </span>
       {open && pos && createPortal(
         <div
-          onMouseEnter={() => setOpen(true)}
-          onMouseLeave={() => setOpen(false)}
+          onMouseEnter={requestOpen}
+          onMouseLeave={requestClose}
           style={{
             position: "fixed",
             top: pos.top,
