@@ -13,8 +13,25 @@
  * re-publishes them. --put exits immediately, so the value disappears
  * from the network 2h later. For long-lived publication use --serve,
  * which keeps the process running and lets the library's built-in
- * republish loop fire every 60 minutes. (See "Persistence and
- * republish" in the README.)
+ * republish loop fire every 60 minutes.
+ *
+ * Reliability note: --put-then-immediately-from-another-process--get
+ * is *unreliable* on the public DHT. The put picks 8 storers via
+ * iterative lookup; the get's lookup, starting from a freshly-warmed
+ * routing table, may converge on a different set of close peers and
+ * miss them. There is no public DHT trick that fixes this in a few
+ * seconds — peers gossip slowly. Two robust patterns:
+ *
+ *   1. Run --serve in one terminal, --get in another, with the same
+ *      state_dir. The serve process republishes every 60 min and
+ *      ALSO answers inbound BEP 44 queries from peers (and from
+ *      itself), so as long as the get's lookup hits any peer that
+ *      knows about us, the value comes back.
+ *   2. Use bep44_add_peer to inject a known peer (e.g. your own node
+ *      on a public IP) so both put and get start from the same
+ *      neighborhood. tests/integration/lib_roundtrip.sh shows this.
+ *
+ * For verified end-to-end round-trip see that integration test.
  */
 
 #include <stdio.h>
@@ -147,16 +164,13 @@ main(int argc, char **argv)
     bep44_ctx_t *ctx = bep44_open(&opts);
     if (!ctx) return 2;
 
-    /* This example runs put and get in *separate processes* (one per
-     * invocation), so the get can't reuse the routing table the put
-     * built up. We need enough peers in the table that an iterative
-     * lookup converges to the same closest-K set the put hit. ≥16
-     * good nodes makes that reliable in practice; cold boot to that
-     * size takes ~60-90s on the public DHT. (The same-process pattern
-     * in the README quickstart only needs ≥4 because put-then-get
-     * share routing table state.) */
-    fprintf(stderr, "bootstrapping (waiting for >=16 good peers)...\n");
-    while (bep44_good_nodes(ctx) < 16) bep44_step(ctx, 250);
+    /* Block until we have enough peers to do real work. Cold-boot to
+     * 4 good nodes against the public DHT takes 30-60s. Going higher
+     * doesn't make cross-process get reliable on its own (see the
+     * file-level reliability note); the lookup's own iterations grow
+     * the table further as needed. */
+    fprintf(stderr, "bootstrapping (waiting for >=4 good peers)...\n");
+    while (bep44_good_nodes(ctx) < 4) bep44_step(ctx, 250);
     fprintf(stderr, "bootstrap: %d good nodes\n", bep44_good_nodes(ctx));
 
     int rc;
