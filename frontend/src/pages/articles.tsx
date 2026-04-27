@@ -37,62 +37,9 @@ export { default as Bep51 } from "./articles/Bep51";
 
 /* ===== /lib/* ===== */
 
-export const LibQuickstart = () => (
-  <ArticleStub
-    title="libbep44 Quickstart — Embed BEP 44 in C"
-    description="Minimal end-to-end example: open the DHT context, generate a key, publish a mutable item, retrieve it. Compiles in 5 lines."
-    path="/lib/quickstart"
-    crumbs={[
-      { label: "Home", to: "/" },
-      { label: "Library", to: "/lib" },
-      { label: "Quickstart" },
-    ]}
-    jsonLd={techArticle(
-      "/lib/quickstart",
-      "libbep44 Quickstart — Embed BEP 44 in C",
-      "Quickstart for the libbep44 BitTorrent DHT C library.",
-      "libbep44, bep 44, bittorrent dht, c library, quickstart",
-    )}
-  />
-);
-
-export const LibApi = () => (
-  <ArticleStub
-    title="libbep44 API Reference"
-    description="Every public function in libbep44.h: signature, description, copy-pastable example, and explicit error cases."
-    path="/lib/api"
-    crumbs={[
-      { label: "Home", to: "/" },
-      { label: "Library", to: "/lib" },
-      { label: "API" },
-    ]}
-    jsonLd={techArticle(
-      "/lib/api",
-      "libbep44 API Reference",
-      "API reference for the libbep44 BitTorrent DHT C library.",
-      "libbep44, api reference, bep 44, bittorrent dht, c library",
-    )}
-  />
-);
-
-export const LibPersistence = () => (
-  <ArticleStub
-    title="Persistence and Republish in libbep44"
-    description="Why BEP 44 items expire after ~2 hours, what state_dir holds, and how the library's republish loop keeps your value alive."
-    path="/lib/persistence"
-    crumbs={[
-      { label: "Home", to: "/" },
-      { label: "Library", to: "/lib" },
-      { label: "Persistence" },
-    ]}
-    jsonLd={techArticle(
-      "/lib/persistence",
-      "Persistence and Republish in libbep44",
-      "How the libbep44 library handles BEP 44 item expiry and republish.",
-      "bep 44, republish, libbep44, bittorrent dht, expiry",
-    )}
-  />
-);
+export { default as LibQuickstart   } from "./articles/LibQuickstart";
+export { default as LibApi          } from "./articles/LibApi";
+export { default as LibPersistence  } from "./articles/LibPersistence";
 
 /* ===== /blog/* ===== */
 
