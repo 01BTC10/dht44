@@ -57,10 +57,27 @@ export function CrawlerBadge(
   const [pos, setPos] = useState<{ top: number; left: number; placement: "below" | "above" } | null>(null);
   const badgeRef = useRef<HTMLSpanElement | null>(null);
   const closeTimer = useRef<number | null>(null);
-  // Per-instance closer — captured by ref so the singleton can call it
-  // without going through React state. Always points at the latest
-  // close logic (cancelClose + setOpen(false) + clearActive).
-  const myCloser = useRef<() => void>(() => {});
+  // Stable per-instance closer. Initialized ONCE (via the empty-ref +
+  // assign-on-first-render pattern) so the same function reference
+  // lives for the badge's entire lifetime. The closure captures
+  // `setOpen` and `closeTimer` — both stable by React/ref contract —
+  // so the function is always correct even if the parent re-renders
+  // hundreds of times. Crucial for the singleton: activeClose holds
+  // this reference, and unmount cleanup compares against it.
+  // Earlier the closer was rebound every render, which made the
+  // identity check `activeClose === myCloser.current` go false after
+  // the first re-render, leaking stale closures from long-lived rows.
+  const myCloser = useRef<() => void>();
+  if (!myCloser.current) {
+    myCloser.current = () => {
+      if (closeTimer.current != null) {
+        window.clearTimeout(closeTimer.current);
+        closeTimer.current = null;
+      }
+      setOpen(false);
+      if (activeClose === myCloser.current) activeClose = null;
+    };
+  }
 
   const cancelClose = () => {
     if (closeTimer.current != null) {
@@ -69,19 +86,12 @@ export function CrawlerBadge(
     }
   };
 
-  // Re-bind the closer every render (closes over current setOpen).
-  myCloser.current = () => {
-    cancelClose();
-    setOpen(false);
-    if (activeClose === myCloser.current) activeClose = null;
-  };
-
   const requestOpen  = () => {
     cancelClose();
     // If a different badge is currently open, close it first. This is
     // the singleton enforcement: at most one popup visible.
     if (activeClose && activeClose !== myCloser.current) activeClose();
-    activeClose = myCloser.current;
+    activeClose = myCloser.current!;
     setOpen(true);
   };
   const requestClose = () => {
