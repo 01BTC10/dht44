@@ -45,22 +45,38 @@ export default function Peers() {
   pausedRef.current = paused;
 
   useEffect(() => {
+    // Apply the pause check both BEFORE firing the fetch (to skip the
+    // tick entirely) AND inside each .then() (to honor a pause that
+    // started while a fetch was already in flight). Without the second
+    // check, hovering a CrawlerBadge tooltip blinks out as soon as the
+    // already-in-flight fetch returns and re-renders the table — the
+    // tooltip's `open` state survives but its DOM ref points at a new
+    // <tr>, and the rapid re-render race closes the portal.
+    const guarded = (set: (v: any) => void) => (v: any) => {
+      if (pausedRef.current) return;
+      set(v);
+    };
     const refresh = () => {
       if (pausedRef.current) return;
-      fetch("/api/peers?limit=500").then(r => r.json()).then(setRows).catch(() => {});
-      fetch("/api/stats").then(r => r.json()).then(s => setTotal(s.peers)).catch(() => {});
-      fetch("/api/client-stats?limit=12").then(r => r.json()).then((s: any) => {
-        setClients(s.clients ?? []);
-        setClientKnown(s.known ?? null);
-      }).catch(() => {});
-      fetch("/api/country-stats?limit=15").then(r => r.json()).then((s: any) => {
-        setCountries(s.countries ?? []);
-        setCountryKnown(s.known ?? null);
-      }).catch(() => {});
-      fetch("/api/infohash-sources").then(r => r.json()).then((s: any) => {
-        setSources(s.sources ?? []);
-        setSourcesTotal(s.total ?? null);
-      }).catch(() => {});
+      fetch("/api/peers?limit=500").then(r => r.json())
+        .then(guarded(setRows)).catch(() => {});
+      fetch("/api/stats").then(r => r.json())
+        .then(guarded((s: any) => setTotal(s.peers))).catch(() => {});
+      fetch("/api/client-stats?limit=12").then(r => r.json())
+        .then(guarded((s: any) => {
+          setClients(s.clients ?? []);
+          setClientKnown(s.known ?? null);
+        })).catch(() => {});
+      fetch("/api/country-stats?limit=15").then(r => r.json())
+        .then(guarded((s: any) => {
+          setCountries(s.countries ?? []);
+          setCountryKnown(s.known ?? null);
+        })).catch(() => {});
+      fetch("/api/infohash-sources").then(r => r.json())
+        .then(guarded((s: any) => {
+          setSources(s.sources ?? []);
+          setSourcesTotal(s.total ?? null);
+        })).catch(() => {});
     };
     refresh();
     const id = setInterval(refresh, 5000);
