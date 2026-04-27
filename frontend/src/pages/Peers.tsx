@@ -131,13 +131,28 @@ export default function Peers() {
 
   const anyGeo = rows.some(r => r.geo?.country);
 
-  const toggleClass = (c: CrawlerClass) => {
+  // Click semantics:
+  //   • All chip → reset to all classes shown
+  //   • Class chip → isolate to that class only
+  //   • Click already-isolated class chip again → reset to all
+  //   • Shift+click on a class chip → multi-select toggle
+  const filterAll = () => setClassFilter(new Set(ALL_CLASSES));
+  const filterToOnly = (c: CrawlerClass, additive: boolean) => {
     setClassFilter(prev => {
-      const next = new Set(prev);
-      if (next.has(c)) next.delete(c); else next.add(c);
-      // Don't allow zero classes — fall back to all.
-      if (next.size === 0) return new Set(ALL_CLASSES);
-      return next;
+      if (additive) {
+        // Multi-select toggle. Keep the prev set, add or remove `c`.
+        const next = new Set(prev);
+        // From the all-on default, treat additive click as "isolate to c"
+        // (like the non-additive path) to avoid the surprising "deselect
+        // ok from the otherwise-all state" you get with a plain toggle.
+        if (next.size === ALL_CLASSES.length) return new Set([c]);
+        if (next.has(c)) next.delete(c); else next.add(c);
+        if (next.size === 0) return new Set(ALL_CLASSES);
+        return next;
+      }
+      // Plain click: isolate to c, or expand back to all if already isolated.
+      if (prev.size === 1 && prev.has(c)) return new Set(ALL_CLASSES);
+      return new Set([c]);
     });
   };
   const allClasses = classFilter.size === ALL_CLASSES.length;
@@ -167,20 +182,31 @@ export default function Peers() {
         </label>
 
         <span style={{ display: "inline-flex", gap: 4, fontSize: 11 }}>
+          <button
+            onClick={filterAll}
+            title="show all classes (reset filter)"
+            style={{
+              background: allClasses ? "#1f2a36" : "#14181d",
+              color: allClasses ? "#8fc0ff" : "#a0a8b0",
+              border: `1px solid ${allClasses ? "#8fc0ff" : "#232a31"}`,
+              padding: "2px 8px", borderRadius: 2, cursor: "pointer",
+              font: "inherit", fontSize: 11,
+            }}
+          >
+            all
+          </button>
           {ALL_CLASSES.map(c => {
-            const active = classFilter.has(c);
-            const lonely = active && classFilter.size === 1;
+            const isShown   = classFilter.has(c);
+            const filtered  = !allClasses && isShown;
             return (
               <button
                 key={c}
-                onClick={() => toggleClass(c)}
-                title={lonely
-                  ? `clearing the last class chip resets to all`
-                  : `toggle ${c}`}
+                onClick={(e) => filterToOnly(c, e.shiftKey)}
+                title={`click: show only ${c} · shift+click: toggle ${c} in the current selection`}
                 style={{
-                  background: active && !allClasses ? "#1f2a36" : "#14181d",
-                  color: active ? "#8fc0ff" : "#556066",
-                  border: `1px solid ${active && !allClasses ? "#8fc0ff" : "#232a31"}`,
+                  background: filtered ? "#1f2a36" : "#14181d",
+                  color: isShown ? "#8fc0ff" : "#556066",
+                  border: `1px solid ${filtered ? "#8fc0ff" : "#232a31"}`,
                   padding: "2px 8px", borderRadius: 2, cursor: "pointer",
                   font: "inherit", fontSize: 11,
                 }}
