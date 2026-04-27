@@ -107,14 +107,15 @@ Save this as `quickstart.c`:
 #include <time.h>
 #include "libbep44.h"
 
-typedef struct { int done; } sync_t;
+typedef struct { int done; } put_state;
+typedef struct { int done; int found; } get_state;
 
 static void on_put(const bep44_put_result_t *r, void *u) {
-    sync_t *s = u; s->done = 1;
+    put_state *p = u; p->done = 1;
     printf("put: stored on %d node(s)\n", r->stored_count);
 }
 static void on_get(const bep44_get_result_t *r, void *u) {
-    sync_t *s = u; s->done = 1;
+    get_state *g = u; g->done = 1; g->found = r->found;
     if (r->found) printf("got %zu bytes (seq=%lld)\n",
                          r->value_len, (long long)r->seq);
     else          puts("not found");
@@ -135,19 +136,28 @@ int main(void) {
         bep44_save_key("./quickstart_state/key.json", &kp);
     }
 
-    /* Wait for the routing table to fill. */
-    time_t deadline = time(NULL) + 10;
-    while (time(NULL) < deadline && bep44_good_nodes(ctx) < 4)
-        bep44_step(ctx, 250);
+    /* Block until we have enough peers to do real work. Cold-boot
+     * against the public DHT takes 30s+ — don't add a time cap here
+     * unless you also handle the "no peers yet" path. */
+    while (bep44_good_nodes(ctx) < 4) bep44_step(ctx, 250);
 
-    sync_t put_s = { 0 };
+    put_state put_s = { 0 };
     bep44_put_mutable(ctx, &kp, NULL, 0, 1, -1,
                       (uint8_t *)"5:hello", 7, on_put, &put_s);
     while (!put_s.done) bep44_step(ctx, 250);
 
-    sync_t get_s = { 0 };
-    bep44_get_mutable(ctx, kp.pk, NULL, 0, on_get, &get_s);
-    while (!get_s.done) bep44_step(ctx, 250);
+    /* Get-after-put on a freshly-bootstrapped node is sometimes flaky:
+     * our lookup may converge on different peers than the put just hit,
+     * because the routing table is still warming up. The lookup itself
+     * grows the routing table as a side effect, so retrying a couple
+     * times reliably resolves it. (If you're testing against the live
+     * mainline DHT for the first time, this is normal.) */
+    for (int attempt = 0; attempt < 5; attempt++) {
+        get_state get_s = { 0 };
+        bep44_get_mutable(ctx, kp.pk, NULL, 0, on_get, &get_s);
+        while (!get_s.done) bep44_step(ctx, 250);
+        if (get_s.found) break;
+    }
 
     bep44_close(ctx);
     return 0;
