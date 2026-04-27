@@ -122,7 +122,7 @@ export default function Graph() {
   const wrapRef = useRef<HTMLDivElement>(null);
   const tipRef = useRef<HTMLDivElement>(null);
 
-  const [limit, setLimit] = useState(1000);
+  const [limit, setLimit] = useState(100);
   const [fetching, setFetching] = useState(false);
   const [settling, setSettling] = useState(false);
   const settleTimer = useRef<number | null>(null);
@@ -219,9 +219,16 @@ export default function Graph() {
       const r = await fetch(`/api/graph?limit=${limit}`);
       const g = await r.json();
       const nodes: Node[] = (g.nodes ?? []);
+      // Daemon shipped both shapes historically: legacy {src,dst}
+      // (still in older deployments) and current {source,target}
+      // (post-redaction-fix). Accept either; drop dangling/self-loops.
       const links: Link[] = (g.links ?? [])
-        .map((e: any) => ({ source: e.src, target: e.dst }))
-        .filter((e: Link) => e.source !== e.target);
+        .map((e: any) => ({
+          source: e.source ?? e.src,
+          target: e.target ?? e.dst,
+        }))
+        .filter((e: Link) =>
+          e.source && e.target && e.source !== e.target);
       setData({ nodes, links });
       setCounts({ nodes: nodes.length, links: links.length });
       if (nodes.length === 0) setSettling(false);
@@ -556,7 +563,8 @@ export default function Graph() {
               </div>
               <div style={{ color: "#a0a8b0", marginBottom: 8 }}>
                 <b style={{ color: "#8fc0ff" }}>line</b>
-                <br/>A → B = A returned B in a find_node response.
+                <br/>one peer returned the other in a find_node
+                reply (direction not drawn).
               </div>
               <div style={{ color: "#8fc0ff", fontSize: 10, letterSpacing: 0.5,
                              marginTop: 8, textTransform: "uppercase" }}>controls</div>

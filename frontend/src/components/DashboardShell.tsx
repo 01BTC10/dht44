@@ -21,7 +21,25 @@ type Stats = {
   infohashes: number;
   bep44_items: number;
   queries_per_min: number;
+  /* Unix seconds of the earliest peer observation in this db.
+   * Used to render "uptime since first observation". 0 if empty. */
+  db_first_seen?: number;
 };
+
+/* "since X" duration in compact form: "3d 4h", "5h 12m", "47m", "8s".
+ * Uses Date arithmetic so it follows the browser's clock and timezone. */
+function fmtUptime(firstSeenSec: number): string {
+  if (!firstSeenSec) return "—";
+  const elapsed = Math.max(0, Date.now() / 1000 - firstSeenSec);
+  const d = Math.floor(elapsed / 86400);
+  const h = Math.floor((elapsed % 86400) / 3600);
+  const m = Math.floor((elapsed % 3600) / 60);
+  const s = Math.floor(elapsed % 60);
+  if (d) return `${d}d ${h}h`;
+  if (h) return `${h}h ${m}m`;
+  if (m) return `${m}m ${s}s`;
+  return `${s}s`;
+}
 
 const TABS: { to: string; label: string }[] = [
   { to: "/dashboard/peers",      label: "peers" },
@@ -37,6 +55,10 @@ export default function DashboardShell() {
 
   useEffect(() => {
     stream.onStatus = setUp;
+    // The Stream singleton is constructed at module-load time, so its
+    // ws.onopen fires before this component mounts and the indicator
+    // misses the "connected" event. Sync to the current state on mount.
+    setUp(stream.isConnected());
     fetch("/api/stats").then(r => r.json()).then(setStats).catch(() => {});
     return stream.subscribe((topic, data) => {
       if (topic === "stats") setStats(data as Stats);
@@ -45,18 +67,33 @@ export default function DashboardShell() {
 
   return (
     <div className="app">
+      {/* Dashboard is now the default landing (/ → /dashboard/peers), so
+       * we let search engines index it. The canonical is the Peers tab,
+       * which is what the index route renders. */}
       <SEO
         title="Live DHT Dashboard — Peers, Queries, Infohashes"
         description="Real-time BitTorrent Mainline DHT observation: live peer counts, BEP 51 infohash sampling, classifier scores, and a 3D peer-graph view."
-        path="/dashboard"
-        noindex
+        path="/dashboard/peers"
       />
       <header>
-        <h1><Link to="/" className="home-link">dht44</Link> <span className="small">crawler</span></h1>
+        <h1><Link to="/dashboard/peers" className="home-link">dht44</Link> <span className="small">crawler</span></h1>
         <span className={"badge-live" + (up ? " on" : "")}>●</span>
         <span className="small">{up ? "connected" : "reconnecting…"}</span>
         <span className="header-spacer" />
-        <Link to="/" className="small">← back to site</Link>
+        <Link
+          to="/intro"
+          style={{
+            color: "#8fc0ff",
+            fontSize: 12,
+            padding: "4px 12px",
+            border: "1px solid #2a3642",
+            borderRadius: 3,
+            background: "#14181d",
+            whiteSpace: "nowrap",
+          }}
+        >
+          about the project →
+        </Link>
       </header>
       {stats && (
         <div className="stats">
@@ -91,6 +128,14 @@ export default function DashboardShell() {
           <div><b>infohashes</b>{stats.infohashes.toLocaleString()}</div>
           <div><b>bep44</b>{stats.bep44_items.toLocaleString()}</div>
           <div><b>rate</b>{stats.queries_per_min}/min</div>
+          {stats.db_first_seen != null && stats.db_first_seen > 0 && (
+            <div
+              title={`since ${new Date(stats.db_first_seen * 1000).toLocaleString()}`}
+              style={{ color: "#a0a8b0" }}
+            >
+              <b>uptime</b>{fmtUptime(stats.db_first_seen)}
+            </div>
+          )}
         </div>
       )}
       <nav className="tabs">
