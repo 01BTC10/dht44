@@ -42,6 +42,13 @@ const POP_GAP = 6;
 // briefly leave the cursor outside the badge's new bounds.
 const CLOSE_DELAY_MS = 250;
 
+// Module-level singleton: only one badge popup is ever open. When a
+// new badge opens, it calls the previous one's close handler. This
+// prevents stale popups from previous hovers sticking around when
+// the cursor moves to a new badge or live refreshes change the
+// rendered set of rows.
+let activeClose: (() => void) | null = null;
+
 export function CrawlerBadge(
   { cls, score, signals, reason }:
   { cls: CrawlerClass; score: number; signals: string[]; reason: string },
@@ -50,6 +57,10 @@ export function CrawlerBadge(
   const [pos, setPos] = useState<{ top: number; left: number; placement: "below" | "above" } | null>(null);
   const badgeRef = useRef<HTMLSpanElement | null>(null);
   const closeTimer = useRef<number | null>(null);
+  // Per-instance closer — captured by ref so the singleton can call it
+  // without going through React state. Always points at the latest
+  // close logic (cancelClose + setOpen(false) + clearActive).
+  const myCloser = useRef<() => void>(() => {});
 
   const cancelClose = () => {
     if (closeTimer.current != null) {
@@ -57,19 +68,39 @@ export function CrawlerBadge(
       closeTimer.current = null;
     }
   };
-  const requestOpen  = () => { cancelClose(); setOpen(true); };
+
+  // Re-bind the closer every render (closes over current setOpen).
+  myCloser.current = () => {
+    cancelClose();
+    setOpen(false);
+    if (activeClose === myCloser.current) activeClose = null;
+  };
+
+  const requestOpen  = () => {
+    cancelClose();
+    // If a different badge is currently open, close it first. This is
+    // the singleton enforcement: at most one popup visible.
+    if (activeClose && activeClose !== myCloser.current) activeClose();
+    activeClose = myCloser.current;
+    setOpen(true);
+  };
   const requestClose = () => {
     cancelClose();
     closeTimer.current = window.setTimeout(() => {
       setOpen(false);
       closeTimer.current = null;
+      if (activeClose === myCloser.current) activeClose = null;
     }, CLOSE_DELAY_MS);
   };
 
   // Cleanup on unmount — important because the popup is portaled to
   // document.body and would outlive a row that gets removed by a live
-  // refresh otherwise.
-  useEffect(() => () => cancelClose(), []);
+  // refresh otherwise. Also surrender the singleton so a freshly-mounted
+  // badge can claim it.
+  useEffect(() => () => {
+    cancelClose();
+    if (activeClose === myCloser.current) activeClose = null;
+  }, []);
 
   // Re-measure the popup position on every render while open. The
   // table re-renders every 5s under live updates; even with same-key
