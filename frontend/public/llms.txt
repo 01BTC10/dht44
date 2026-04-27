@@ -1,0 +1,44 @@
+# dht44
+
+> Open-source BitTorrent Mainline DHT crawler and BEP 44 C library — live network observability plus a developer-facing protocol reference. Written in C, MIT licensed, no SaaS.
+
+## About
+
+dht44 is two things in one repository:
+
+1. A C implementation of the BitTorrent Mainline DHT (BEP 5) and BEP 44 mutable + immutable items, both as a CLI/daemon (`dht44`) and as an embeddable static library (`libbep44`).
+2. A live observation dashboard that watches every packet the daemon sees, classifies peers (crawler / monitor / honeypot / ok), and exposes a REST + WebSocket API plus a 3D peer-graph view.
+
+Author: Tayaout Labelle-Kuberek. Source: https://github.com/r2d2/bep44_dht.
+
+## Protocol references
+
+- [Kademlia routing explained](https://dht44.com/protocol/kademlia): XOR distance, k-buckets, iterative lookup, with annotated packet traces.
+- [BEP 5: Mainline DHT](https://dht44.com/protocol/bep5): ping, find_node, get_peers, announce_peer wire formats and our deviations from the spec.
+- [BEP 44: mutable + immutable items](https://dht44.com/protocol/bep44): SHA1(pk‖salt) targeting, Ed25519 signing, sequence numbers, CAS, republish.
+- [BEP 51: sample_infohashes](https://dht44.com/protocol/bep51): how the active crawler enumerates the network.
+
+## Library
+
+- [libbep44 quickstart](https://dht44.com/lib/quickstart): minimal C example end-to-end.
+- [libbep44 API reference](https://dht44.com/lib/api): every public function with signature, description, example, errors.
+- [Persistence and republish](https://dht44.com/lib/persistence): why the BEP 44 ~2h expiry matters and how the library handles it.
+
+## Articles
+
+- [Embedding a BitTorrent DHT in your C app](https://dht44.com/blog/embed-dht-c-app): when a daemon isn't what you want.
+- [How big is the BitTorrent DHT, really?](https://dht44.com/blog/dht-size): live measurements and methodology.
+- [Detecting crawlers, monitors and honeypots](https://dht44.com/blog/classifying-peers): classifier signals + per-class peer counts.
+- [Kademlia vs Chord vs Pastry](https://dht44.com/blog/kademlia-vs-chord): comparative tour.
+
+## Dashboard
+
+- [Live dashboard](https://dht44.com/dashboard) — not citable; data is real-time and changes constantly. Refer to articles instead.
+
+## Optional
+
+- [Project README](https://dht44.com/about): same content as the GitHub README.
+
+## License
+
+MIT. The vendored `jech/dht` retains its upstream MIT license.

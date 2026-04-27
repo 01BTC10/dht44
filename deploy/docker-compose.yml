@@ -1,0 +1,88 @@
+# Production stack for dht44.com.
+#
+# Bring up:
+#   docker compose --env-file ./umami/.env up -d umami umami-db
+#   docker compose run --rm certbot certonly --webroot -w /var/www/certbot \
+#       -d dht44.com -d www.dht44.com -d analytics.dht44.com \
+#       --agree-tos -m you@example.com
+#   docker compose --env-file ./umami/.env up -d web certbot
+#
+# Subsequent deploys (rebuild static site + roll the web container):
+#   git pull
+#   docker compose build web
+#   docker compose --env-file ./umami/.env up -d web
+#
+# Networks:
+#   front  — web ↔ umami ↔ certbot, public-facing
+#   back   — umami ↔ umami-db only (db NOT exposed)
+
+services:
+  web:
+    build:
+      context: ..
+      dockerfile: deploy/nginx/Dockerfile
+    image: dht44-web:latest
+    container_name: dht44-web
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - /etc/letsencrypt:/etc/letsencrypt:ro
+      - certbot-webroot:/var/www/certbot
+    depends_on:
+      - umami
+    networks: [front]
+
+  umami:
+    image: ghcr.io/umami-software/umami:postgresql-latest
+    container_name: dht44-umami
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgres://umami:${UMAMI_DB_PASSWORD}@umami-db:5432/umami
+      DATABASE_TYPE: postgresql
+      APP_SECRET: ${UMAMI_APP_SECRET}
+    depends_on:
+      umami-db:
+        condition: service_healthy
+    networks: [front, back]
+
+  umami-db:
+    image: postgres:16-alpine
+    container_name: dht44-umami-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: umami
+      POSTGRES_USER: umami
+      POSTGRES_PASSWORD: ${UMAMI_DB_PASSWORD}
+    volumes:
+      - umami-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U umami -d umami"]
+      interval: 5s
+      retries: 10
+    # Not on the front network — DB is not publicly reachable.
+    networks: [back]
+
+  certbot:
+    image: certbot/certbot:latest
+    container_name: dht44-certbot
+    volumes:
+      - /etc/letsencrypt:/etc/letsencrypt
+      - certbot-webroot:/var/www/certbot
+    # Re-run renew every 12h. nginx picks up the new cert after reload.
+    entrypoint: >
+      /bin/sh -c "trap exit TERM;
+                  while :;
+                    do certbot renew --webroot -w /var/www/certbot --quiet;
+                       sleep 12h & wait $${!};
+                  done"
+    networks: [front]
+
+volumes:
+  umami-db-data:
+  certbot-webroot:
+
+networks:
+  front:
+  back:

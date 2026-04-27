@@ -19,3 +19,6 @@ log.txt
 
 # claude-code session metadata
 .claude/
+
+# deployment secrets (only the .env.example is tracked)
+deploy/umami/.env
