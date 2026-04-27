@@ -158,8 +158,15 @@ export function CrawlerBadge(
       </span>
       {open && pos && createPortal(
         <div
-          onMouseEnter={requestOpen}
-          onMouseLeave={requestClose}
+          // The popup hangs from document.body and overlays rows below
+          // the badge. With pointer-events: auto, the cursor can't reach
+          // the badge underneath the popup, so its onMouseEnter never
+          // fires and its tooltip appears "broken". Set pointer-events:
+          // none so the cursor passes straight through — the badge
+          // underneath always receives events, and the singleton takes
+          // over correctly when the cursor reaches it. The popup is
+          // info-only (no clickable elements), so disabling its own
+          // pointer events costs nothing.
           style={{
             position: "fixed",
             top: pos.top,
@@ -176,7 +183,7 @@ export function CrawlerBadge(
             lineHeight: 1.5,
             boxShadow: "0 4px 12px rgba(0,0,0,0.6)",
             whiteSpace: "normal",
-            pointerEvents: "auto",
+            pointerEvents: "none",
           }}
         >
           <div style={{ color: s.fg, fontWeight: 600, marginBottom: 4 }}>
