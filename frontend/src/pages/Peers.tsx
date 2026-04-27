@@ -29,11 +29,18 @@ type SourceBucket = { source: string; count: number };
 type ClientBucket  = { v_string: string | null; count: number };
 type CountryBucket = { iso: string; count: number };
 
+const ALL_CLASSES: CrawlerClass[] = ["ok", "crawler", "monitor", "honeypot"];
+const PAGE_SIZES = [50, 100, 250, 500, 1000];
+
 export default function Peers() {
   const [rows, setRows] = useState<Row[]>([]);
   const [total, setTotal] = useState<number | null>(null);
   const [filter, setFilter] = useState("");
   const [bep51Only, setBep51Only] = useState(false);
+  const [pageSize, setPageSize] = useState<number>(100);
+  const [classFilter, setClassFilter] = useState<Set<CrawlerClass>>(
+    new Set(ALL_CLASSES),
+  );
   const [clients,   setClients]   = useState<ClientBucket[] | null>(null);
   const [countries, setCountries] = useState<CountryBucket[] | null>(null);
   const [sources,   setSources]   = useState<SourceBucket[] | null>(null);
@@ -87,41 +94,121 @@ export default function Peers() {
     return () => { clearInterval(id); unsub(); };
   }, []);
 
-  const f = filter.toLowerCase();
-  let filtered = f
-    ? rows.filter(r => {
-        const s = [
-          r.ip, r.geo?.country, r.geo?.city, r.geo?.asn_org,
-          countryName(r.geo?.country),
-          decodeVString(r.v_string),
-        ].filter(Boolean).join(" ").toLowerCase();
-        return s.includes(f);
-      })
+  // Class filter: only rows whose tag is in the selected set.
+  const peerCls = (r: Row): CrawlerClass =>
+    (r.crawler_class ?? (r.likely_crawler ? "crawler" : "ok")) as CrawlerClass;
+  let filtered: Row[] = classFilter.size < ALL_CLASSES.length
+    ? rows.filter(r => classFilter.has(peerCls(r)))
     : rows;
+
+  const f = filter.toLowerCase();
+  if (f) {
+    filtered = filtered.filter(r => {
+      // Search text now also covers the classifier tag and any crawler
+      // signal names ("port_farm_strong", "silent_taker", …) so users
+      // can type "honeypot", "monitor", "port_farm", etc.
+      const s = [
+        r.ip, r.geo?.country, r.geo?.city, r.geo?.asn_org,
+        countryName(r.geo?.country),
+        decodeVString(r.v_string),
+        peerCls(r),
+        ...(r.crawler_signals ?? []),
+      ].filter(Boolean).join(" ").toLowerCase();
+      return s.includes(f);
+    });
+  }
   if (bep51Only) filtered = filtered.filter(r => r.supports_bep51 === 1);
+
+  // Cap rendered rows at pageSize. The full filtered set is what we
+  // count for "X shown / Y matched / Z total"; only the first pageSize
+  // are turned into <tr> elements. Keeping the DOM small is the
+  // single biggest factor in keeping CrawlerBadge tooltips snappy
+  // across live re-renders.
+  const matchedCount = filtered.length;
+  const visibleRows = filtered.slice(0, pageSize);
 
   const bep51Count = rows.filter(r => r.supports_bep51 === 1).length;
 
   const anyGeo = rows.some(r => r.geo?.country);
 
+  const toggleClass = (c: CrawlerClass) => {
+    setClassFilter(prev => {
+      const next = new Set(prev);
+      if (next.has(c)) next.delete(c); else next.add(c);
+      // Don't allow zero classes — fall back to all.
+      if (next.size === 0) return new Set(ALL_CLASSES);
+      return next;
+    });
+  };
+  const allClasses = classFilter.size === ALL_CLASSES.length;
+
   return (
     <>
-      <div className="filter">
-        <input placeholder="filter by ip / country / client…"
-               value={filter} onChange={e => setFilter(e.target.value)} />
-        <label style={{ marginLeft: 12, fontSize: 11, color: "#a0a8b0" }}>
+      <div className="filter" style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 10 }}>
+        <input placeholder="filter by ip / country / client / tag / signal…"
+               value={filter} onChange={e => setFilter(e.target.value)}
+               style={{ flex: "1 1 260px" }} />
+
+        <label style={{ fontSize: 11, color: "#a0a8b0" }}>
+          show
+          <select
+            value={pageSize}
+            onChange={e => setPageSize(Number(e.target.value))}
+            style={{
+              marginLeft: 4, marginRight: 4,
+              background: "#0f1316", color: "#d8dee6",
+              border: "1px solid #232a31", padding: "3px 6px",
+              fontFamily: "inherit", fontSize: 11,
+            }}
+          >
+            {PAGE_SIZES.map(n => <option key={n} value={n}>{n}</option>)}
+          </select>
+          rows
+        </label>
+
+        <span style={{ display: "inline-flex", gap: 4, fontSize: 11 }}>
+          {ALL_CLASSES.map(c => {
+            const active = classFilter.has(c);
+            const lonely = active && classFilter.size === 1;
+            return (
+              <button
+                key={c}
+                onClick={() => toggleClass(c)}
+                title={lonely
+                  ? `clearing the last class chip resets to all`
+                  : `toggle ${c}`}
+                style={{
+                  background: active && !allClasses ? "#1f2a36" : "#14181d",
+                  color: active ? "#8fc0ff" : "#556066",
+                  border: `1px solid ${active && !allClasses ? "#8fc0ff" : "#232a31"}`,
+                  padding: "2px 8px", borderRadius: 2, cursor: "pointer",
+                  font: "inherit", fontSize: 11,
+                }}
+              >
+                {c}
+              </button>
+            );
+          })}
+        </span>
+
+        <label style={{ fontSize: 11, color: "#a0a8b0" }}>
           <input type="checkbox" checked={bep51Only}
                  onChange={e => setBep51Only(e.target.checked)}
                  style={{ marginRight: 4 }} />
           BEP 51 only ({bep51Count})
         </label>
-        <span className="small" style={{ marginLeft: 10 }}>
-          {filtered.length} shown / <b style={{ color: "#8fc0ff" }}>
+
+        <span className="small" style={{ marginLeft: "auto" }}>
+          showing <b style={{ color: "#8fc0ff" }}>{visibleRows.length}</b>
+          {" "}of {matchedCount.toLocaleString()} matched
+          {" / "}
+          <b style={{ color: "#8fc0ff" }}>
             {total != null ? total.toLocaleString() : rows.length}
-          </b> unique peers seen
+          </b> unique peers
         </span>
+
         {!anyGeo && total != null && (
-          <span className="small" style={{ marginLeft: 14, color: "#a87a3a" }}>
+          <span className="small" style={{ width: "100%", color: "#a87a3a" }}>
             no GeoIP db loaded — flags will appear once --geoip-city is set
           </span>
         )}
@@ -230,11 +317,11 @@ export default function Peers() {
           </tr>
         </thead>
         <tbody>
-          {filtered.map(r => {
+          {visibleRows.map(r => {
             const iso  = r.geo?.country;
             const flag = countryFlag(iso);
             const name = countryName(iso);
-            const cls  = (r.crawler_class ?? (r.likely_crawler ? "crawler" : "ok")) as CrawlerClass;
+            const cls  = peerCls(r);
             return (
               <tr key={r.ip + ":" + r.port}>
                 <td>
