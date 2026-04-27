@@ -94,12 +94,38 @@ export default function Peers() {
     return () => { clearInterval(id); unsub(); };
   }, []);
 
+  // Stable per-row key. Plain `ip:port` collides whenever the daemon's
+  // /24 or /48 redaction folds two different peers onto the same prefix
+  // (~3.5% of rows in observation), which makes React render incorrectly
+  // (duplicate keys, tooltips that refuse to open on stuck rows, etc).
+  // Adding node_id covers the redaction case; first_seen is the fallback
+  // for peers we haven't observed a node_id from yet.
+  const rowKey = (r: Row) =>
+    `${r.ip}:${r.port}:${r.node_id ?? r.first_seen}`;
+
+  // Dedupe: the API can return the same logical peer multiple times
+  // when the daemon has it under several rows (different textual IPv6
+  // forms, the all-zeros node_id sentinel, NAT'd ports under one node,
+  // etc). Keep the latest-seen instance per rowKey so the table shows
+  // each peer exactly once.
+  const dedupedRows = (() => {
+    const seen = new Map<string, Row>();
+    for (const r of rows) {
+      const k = rowKey(r);
+      const prev = seen.get(k);
+      if (!prev || (r.last_seen ?? 0) > (prev.last_seen ?? 0)) {
+        seen.set(k, r);
+      }
+    }
+    return Array.from(seen.values());
+  })();
+
   // Class filter: only rows whose tag is in the selected set.
   const peerCls = (r: Row): CrawlerClass =>
     (r.crawler_class ?? (r.likely_crawler ? "crawler" : "ok")) as CrawlerClass;
   let filtered: Row[] = classFilter.size < ALL_CLASSES.length
-    ? rows.filter(r => classFilter.has(peerCls(r)))
-    : rows;
+    ? dedupedRows.filter(r => classFilter.has(peerCls(r)))
+    : dedupedRows;
 
   const f = filter.toLowerCase();
   if (f) {
@@ -127,9 +153,9 @@ export default function Peers() {
   const matchedCount = filtered.length;
   const visibleRows = filtered.slice(0, pageSize);
 
-  const bep51Count = rows.filter(r => r.supports_bep51 === 1).length;
+  const bep51Count = dedupedRows.filter(r => r.supports_bep51 === 1).length;
 
-  const anyGeo = rows.some(r => r.geo?.country);
+  const anyGeo = dedupedRows.some(r => r.geo?.country);
 
   // Click semantics:
   //   • All chip → reset to all classes shown
@@ -349,7 +375,7 @@ export default function Peers() {
             const name = countryName(iso);
             const cls  = peerCls(r);
             return (
-              <tr key={r.ip + ":" + r.port}>
+              <tr key={rowKey(r)}>
                 <td>
                   {r.ip}:{r.port}
                   {cls !== "ok" && (
