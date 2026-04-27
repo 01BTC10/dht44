@@ -4,6 +4,8 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width,initial-scale=1" />
 
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+
     <!-- Defaults — every page overrides these via <SEO> + react-helmet-async -->
     <title>dht44 — BitTorrent Mainline DHT toolkit</title>
     <meta name="description" content="Open-source BitTorrent Mainline DHT crawler and BEP 44 C library — live network observability plus a developer-facing protocol reference." />
@@ -22,9 +24,41 @@
 
     <!-- Tell crawlers about the AI-friendly Markdown summary -->
     <link rel="alternate" type="text/plain" href="/llms.txt" title="llms.txt" />
+
   </head>
   <body>
     <div id="root"></div>
+
+    <!--
+      Non-JS fallback. The dashboard renders client-side, so crawlers that
+      don't execute JS (Bing's basic bot, DuckDuckGo's, most AI bots,
+      old archive crawlers) only see the empty #root above. This block
+      gives them a meaningful description plus crawlable links to the
+      static content pages, each of which has its own per-page SEO via
+      react-helmet-async. Hidden from JS-enabled visitors automatically.
+    -->
+    <noscript>
+      <header style="font-family: ui-monospace, monospace; max-width: 760px; margin: 40px auto; padding: 0 18px; color: #d8dee6;">
+        <h1 style="color: #8fc0ff;">dht44 — Live BitTorrent Mainline DHT Dashboard</h1>
+        <p>
+          Real-time observation of the public Mainline DHT: live peer
+          counts, query rates, BEP 51 infohash sampling, classifier
+          scores, and a 3D peer-graph. Open-source MIT C toolkit.
+        </p>
+        <p>
+          The interactive dashboard requires JavaScript. The protocol
+          reference and library docs work without it:
+        </p>
+        <ul>
+          <li><a href="/intro">About the project</a></li>
+          <li><a href="/protocol">Protocol reference (Kademlia, BEP 5, BEP 44, BEP 51)</a></li>
+          <li><a href="/lib">libbep44 — embeddable C library</a></li>
+          <li><a href="/blog">Blog: DHT size, classifying peers, embedding the daemon</a></li>
+          <li><a href="https://github.com/01BTC10/dht44">Source on GitHub</a></li>
+        </ul>
+      </header>
+    </noscript>
+
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

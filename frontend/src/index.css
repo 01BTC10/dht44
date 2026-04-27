@@ -328,3 +328,48 @@ td.newrow { animation: flash 1.8s ease-out; }
 }
 .not-found h1 { font-size: 80px; color: #8fc0ff; margin: 0; }
 
+/* ============================================================
+ * Mobile (≤720px). Desktop-first layout; this block only relaxes
+ * fixed widths, lets nav/tabs scroll horizontally, and collapses
+ * the 2-column panel grid to 1 column. Nothing in the desktop
+ * presentation changes.
+ * ============================================================ */
+@media (max-width: 720px) {
+  body { font-size: 12px; }
+  .app { padding: 10px 12px; }
+  .site-main { padding: 18px 16px 60px; }
+  .site-header { padding: 10px 14px; flex-wrap: wrap; gap: 10px; }
+  .site-nav {
+    width: 100%;
+    overflow-x: auto;
+    flex-wrap: nowrap;
+    padding-bottom: 4px;
+  }
+  .site-nav a { white-space: nowrap; }
+  .site-header .gh-link { margin-left: auto; }
+
+  /* Dashboard header collapses. The flex spacer hides so the
+   * "about the project →" link wraps cleanly. */
+  .app > header { flex-wrap: wrap; }
+  .app > header .header-spacer { display: none; }
+
+  /* Tab strip: scroll horizontally instead of wrapping. */
+  nav.tabs { overflow-x: auto; flex-wrap: nowrap; }
+  nav.tabs a { white-space: nowrap; }
+
+  /* Two-column sub-panels (peers / queries pages) → single column. */
+  .panels { grid-template-columns: 1fr; }
+
+  /* Tables get a horizontal scrollbar instead of overflowing the page. */
+  table { display: block; overflow-x: auto; max-width: 100%; }
+
+  /* Filter input no longer hard-coded to 260px. */
+  .filter input { width: 100%; max-width: 320px; }
+
+  /* Site footer wraps onto two lines. */
+  .site-footer { flex-direction: column; gap: 4px; }
+
+  /* Hero hugs the screen. */
+  .hero h1 { font-size: 32px; }
+}
+

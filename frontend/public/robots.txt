@@ -81,10 +81,11 @@ Disallow: /
 User-agent: PetalBot
 Disallow: /
 
-# --- Default: allow everything except live dashboard + API ---
+# --- Default: allow everything except the API. Dashboard is now the
+#     canonical landing page (/ redirects to /dashboard/peers) so it
+#     is intentionally crawlable — only the JSON API is blocked. ---
 User-agent: *
 Allow: /
-Disallow: /dashboard
 Disallow: /api/
 
 Sitemap: https://dht44.com/sitemap.xml
