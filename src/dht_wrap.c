@@ -417,9 +417,11 @@ dht_wrap_init_opt(uint16_t port, int want_ipv6)
         extern FILE *dht_debug;
         dht_debug = stderr;
     }
-    /* Version: "DH44" — 4 bytes. Pass both fds to jech so it maintains a
-     * v4 and v6 routing table; s_sock6 may be -1 if v6 is disabled. */
-    if (dht_init(s_sock, s_sock6, s_node_id, (const unsigned char *)"DH44") < 0) {
+    /* Client version tag, advertised in the optional KRPC `v` field of
+     * outbound queries/responses. 4 bytes per BEP 5 convention. "LB44"
+     * = libbep44; bump if you fork. Pass both fds to jech so it
+     * maintains a v4 and v6 routing table; s_sock6 may be -1. */
+    if (dht_init(s_sock, s_sock6, s_node_id, (const unsigned char *)"LB44") < 0) {
         fprintf(stderr, "[dht44:dht_wrap] dht_init failed\n");
         close(s_sock); s_sock = -1;
         if (s_sock6 >= 0) { close(s_sock6); s_sock6 = -1; }

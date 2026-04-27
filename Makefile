@@ -1,15 +1,16 @@
 CC      ?= cc
 CFLAGS  ?= -O2 -Wall -Wextra -std=c11
 CFLAGS  += -Iinclude -Isrc -Ivendor/jech-dht
-LDFLAGS ?= -lsodium -lcrypto -ljansson
+LDFLAGS ?= -lsodium -lcrypto -ljansson -lminiupnpc
 
-# Library sources only — no CLI / daemon / IPC / UPnP.
+# Library sources only — no CLI / daemon / IPC.
 LIB_SRC := \
     src/bencode.c \
     src/bep44.c \
     src/state.c \
     src/dht_wrap.c \
     src/lookup.c \
+    src/upnp.c \
     src/lib.c \
     vendor/jech-dht/dht.c
 

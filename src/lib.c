@@ -31,6 +31,9 @@
 #include "dht_wrap.h"
 #include "lookup.h"
 #include "state.h"
+#include "upnp.h"
+
+#include <time.h>
 
 /* ============================================================
  * Inbound BEP 44 server. The library doubles as a BEP 44 server:
@@ -250,9 +253,16 @@ on_inbound_query(const struct sockaddr *peer, int peerlen,
  * ============================================================ */
 
 struct bep44_ctx {
-    int  open;
-    int  port;
-    char state_dir[1024];
+    int     open;
+    int     port;
+    char    state_dir[1024];
+    /* UPnP */
+    int     upnp_active;
+    time_t  upnp_next_refresh;
+    int     upnp_lifetime;
+    /* Republish */
+    int     republish_secs;        /* 0 disables */
+    time_t  next_republish_at;
 };
 
 static struct bep44_ctx g_ctx;
@@ -371,6 +381,16 @@ bep44_open(const bep44_opts_t *opts)
     randombytes_buf(g_token_secret, sizeof(g_token_secret));
     dht_wrap_set_query_handler(on_inbound_query, NULL);
 
+    /* Optional UPnP IGD port mapping. Best-effort. */
+    int upnp_lifetime = opts->upnp_lifetime_sec > 0
+                        ? opts->upnp_lifetime_sec : 3600;
+    int upnp_active = 0;
+    if (opts->use_upnp && opts->port > 0) {
+        if (upnp_init((uint16_t)opts->port, (uint32_t)upnp_lifetime) == 0) {
+            upnp_active = 1;
+        }
+    }
+
     /* Warm-start from any persisted nodes. */
     struct sockaddr_in warm[256];
     int warm_n = 0;
@@ -382,10 +402,22 @@ bep44_open(const bep44_opts_t *opts)
         (void)dht_wrap_ping_routers();
     }
 
+    int rep_min = opts->republish_minutes;
+    if (rep_min == 0) rep_min = 60;
+    int rep_secs = rep_min < 0 ? 0 : rep_min * 60;
+
     memset(&g_ctx, 0, sizeof(g_ctx));
     g_ctx.open = 1;
     g_ctx.port = opts->port;
     snprintf(g_ctx.state_dir, sizeof(g_ctx.state_dir), "%s", opts->state_dir);
+    g_ctx.upnp_active        = upnp_active;
+    g_ctx.upnp_lifetime      = upnp_lifetime;
+    g_ctx.upnp_next_refresh  = time(NULL) + (upnp_lifetime > 60
+                                            ? upnp_lifetime / 2 : 30);
+    g_ctx.republish_secs     = rep_secs;
+    /* Don't republish on the very first step — let the routing table
+     * settle first. Schedule the first sweep one cycle out. */
+    g_ctx.next_republish_at  = rep_secs > 0 ? time(NULL) + rep_secs : 0;
     memset(g_puts, 0, sizeof(g_puts));
     memset(g_gets, 0, sizeof(g_gets));
     return &g_ctx;
@@ -414,6 +446,10 @@ bep44_close(bep44_ctx_t *ctx)
             get_release(&g_gets[i]);
         }
     }
+    if (ctx->upnp_active) {
+        upnp_shutdown();
+        ctx->upnp_active = 0;
+    }
     dht_wrap_uninit();
     ctx->open = 0;
 }
@@ -425,6 +461,147 @@ bep44_fd(const bep44_ctx_t *ctx)
     return dht_wrap_socket();
 }
 
+/* ============================================================
+ * Republish — re-push every stored item every republish_secs so peer
+ * caches don't expire it (BEP 44 items live ~2h on storers).
+ *
+ * For peer-origin items we re-emit the original signed bytes verbatim
+ * (no key needed). For self-origin items, same thing — the signature
+ * is already valid for that (seq, v, salt) and remains so as long as
+ * we don't bump seq.
+ *
+ * Implementation: walk items/<target>.json, for each item run a fresh
+ * lookup, then on lookup completion fan out put queries with the
+ * stored sig + token from each responder.
+ * ============================================================ */
+
+typedef struct rep_op {
+    int          in_use;
+    uint8_t      target[BEP44_TARGET_LEN];
+    stored_item  item;
+    int          pending;
+} rep_op;
+
+#define REP_MAX_INFLIGHT 4
+static rep_op g_reps[REP_MAX_INFLIGHT];
+
+static rep_op *
+rep_alloc(void)
+{
+    for (int i = 0; i < REP_MAX_INFLIGHT; i++)
+        if (!g_reps[i].in_use) {
+            memset(&g_reps[i], 0, sizeof(g_reps[i]));
+            g_reps[i].in_use = 1;
+            return &g_reps[i];
+        }
+    return NULL;
+}
+
+static void
+on_rep_response(bep44_tx_event ev,
+                const struct sockaddr *peer, int peerlen,
+                const bencode_value *r, const bencode_value *e,
+                void *closure)
+{
+    (void)ev; (void)peer; (void)peerlen; (void)r; (void)e;
+    rep_op *p = closure;
+    if (!p->in_use) return;
+    if (--p->pending <= 0) memset(p, 0, sizeof(*p));
+}
+
+static void
+on_rep_lookup_done(int rc,
+                   const lookup_value *values, size_t value_count,
+                   const lookup_token *tokens, size_t token_count,
+                   void *closure)
+{
+    (void)rc; (void)values; (void)value_count;
+    rep_op *p = closure;
+    if (!p->in_use) return;
+    if (token_count == 0) { memset(p, 0, sizeof(*p)); return; }
+
+    p->pending = 0;
+    for (size_t i = 0; i < token_count; i++) {
+        const lookup_token *t = &tokens[i];
+        uint8_t pkt[1500];
+        ssize_t plen;
+        uint8_t tid[2];
+        dht_wrap_random_tid(tid);
+
+        if (p->item.mutable_) {
+            plen = bep44_build_put_query_mutable(
+                pkt, sizeof(pkt), tid, sizeof(tid),
+                dht_wrap_node_id(), p->item.pk,
+                p->item.salt_len ? p->item.salt : NULL, p->item.salt_len,
+                p->item.seq, NULL, p->item.sig,
+                t->token, t->token_len,
+                p->item.v, p->item.v_len);
+        } else {
+            plen = bep44_build_put_query_immutable(
+                pkt, sizeof(pkt), tid, sizeof(tid),
+                dht_wrap_node_id(),
+                t->token, t->token_len,
+                p->item.v, p->item.v_len);
+        }
+        if (plen < 0) continue;
+        if (dht_wrap_send_query((const struct sockaddr *)&t->peer,
+                                (int)t->peerlen, pkt, (size_t)plen,
+                                tid, sizeof(tid), 5000,
+                                on_rep_response, p) == 0) {
+            p->pending++;
+        }
+    }
+    if (p->pending == 0) memset(p, 0, sizeof(*p));
+}
+
+typedef struct {
+    int *budget;     /* how many items we may still kick off this sweep */
+} rep_walk_ctx;
+
+static int
+republish_one(const uint8_t target[BEP44_TARGET_LEN], void *closure)
+{
+    rep_walk_ctx *w = closure;
+    if (*w->budget <= 0) return 1;        /* stop iteration */
+
+    /* Skip if already in flight for the same target. */
+    for (int i = 0; i < REP_MAX_INFLIGHT; i++) {
+        if (g_reps[i].in_use
+            && memcmp(g_reps[i].target, target, BEP44_TARGET_LEN) == 0)
+            return 0;
+    }
+
+    rep_op *p = rep_alloc();
+    if (!p) return 1;                     /* table full — defer */
+    if (state_load_item(target, &p->item) < 0) {
+        memset(p, 0, sizeof(*p));
+        return 0;
+    }
+    memcpy(p->target, target, BEP44_TARGET_LEN);
+    if (lookup_start(p->target, 15000, on_rep_lookup_done, p) == NULL) {
+        memset(p, 0, sizeof(*p));
+        return 0;
+    }
+    (*w->budget)--;
+    return 0;
+}
+
+static void
+maybe_republish(bep44_ctx_t *ctx)
+{
+    if (ctx->republish_secs <= 0) return;
+    time_t now = time(NULL);
+    if (now < ctx->next_republish_at) return;
+    /* Cap how much we kick off in one sweep — REP_MAX_INFLIGHT slots
+     * means at most that many lookups concurrently. The walk picks up
+     * items in directory order; nodes left over this sweep get caught
+     * next time around. */
+    int budget = REP_MAX_INFLIGHT;
+    rep_walk_ctx w = { &budget };
+    state_walk_items(republish_one, &w);
+    ctx->next_republish_at = now + ctx->republish_secs;
+}
+
 int
 bep44_step(bep44_ctx_t *ctx, int timeout_ms)
 {
@@ -433,6 +610,15 @@ bep44_step(bep44_ctx_t *ctx, int timeout_ms)
     int look_wake = timeout_ms;
     dht_wrap_step(NULL, 0, NULL, 0, &wrap_wake);
     lookup_tick(&look_wake);
+    maybe_republish(ctx);
+    if (ctx->upnp_active) {
+        time_t now = time(NULL);
+        if (now >= ctx->upnp_next_refresh) {
+            (void)upnp_refresh();
+            ctx->upnp_next_refresh = now + (ctx->upnp_lifetime > 60
+                                           ? ctx->upnp_lifetime / 2 : 30);
+        }
+    }
     int wake = wrap_wake < look_wake ? wrap_wake : look_wake;
     if (wake < 0) wake = 0;
     if (wake > timeout_ms) wake = timeout_ms;
@@ -685,6 +871,20 @@ bep44_put_mutable(bep44_ctx_t *ctx,
         put_release(p); return -1;
     }
 
+    /* Persist for republish + inbound serve. */
+    {
+        stored_item si = { 0 };
+        si.mutable_ = 1;
+        si.origin   = ITEM_ORIGIN_SELF;
+        memcpy(si.pk, kp->pk, BEP44_PK_LEN);
+        si.seq = seq;
+        if (salt_len) { memcpy(si.salt, salt, salt_len); si.salt_len = salt_len; }
+        memcpy(si.sig, p->sig, BEP44_SIG_LEN);
+        memcpy(si.v, v_bencoded, v_len);
+        si.v_len = v_len;
+        (void)state_save_item(p->target, &si);
+    }
+
     if (lookup_start(p->target, 15000, on_put_lookup_done, p) == NULL) {
         put_release(p); return -1;
     }
@@ -709,6 +909,16 @@ bep44_put_immutable(bep44_ctx_t *ctx,
     memcpy(p->v, v_bencoded, v_len);
     p->v_len = v_len;
     bep44_immutable_target(p->target, v_bencoded, v_len);
+
+    /* Persist for republish + inbound serve. */
+    {
+        stored_item si = { 0 };
+        si.mutable_ = 0;
+        si.origin   = ITEM_ORIGIN_SELF;
+        memcpy(si.v, v_bencoded, v_len);
+        si.v_len = v_len;
+        (void)state_save_item(p->target, &si);
+    }
 
     if (lookup_start(p->target, 15000, on_put_lookup_done, p) == NULL) {
         put_release(p); return -1;

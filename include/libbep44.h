@@ -67,6 +67,16 @@ typedef struct {
     int          port;              /* UDP port; 0 = let OS pick */
     const char  *state_dir;         /* required, must already be writable */
     int          bootstrap_routers; /* 1 = ping public routers on open */
+    int          use_upnp;          /* 1 = ask the router to forward `port`
+                                     * via UPnP IGD. Best-effort; a
+                                     * discovery/mapping failure is logged
+                                     * and the library continues. */
+    int          upnp_lifetime_sec; /* UPnP lease duration; 0 = 3600 */
+    int          republish_minutes; /* re-push every stored item on this
+                                     * cadence so they don't expire from
+                                     * peer caches (BEP 44 items live ~2h
+                                     * on storers). 0 = default 60.
+                                     * Set to a negative value to disable. */
 } bep44_opts_t;
 
 typedef struct {
