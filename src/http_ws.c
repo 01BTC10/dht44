@@ -333,7 +333,8 @@ classify_peer(json_t *row, json_t *geo)
         score += 2;
         json_array_append_new(signals, json_string("silent_taker"));
         snprintf(tmp, sizeof(tmp),
-                 "answered %lld queries, never appears in any routing table",
+                 "returned %lld distinct peers in find_node replies but"
+                 " never appears in anyone else's routing table",
                  (long long)as_src);
         append_reason(reason, sizeof(reason), &rused, tmp);
     }
@@ -380,7 +381,8 @@ classify_peer(json_t *row, json_t *geo)
         score += 2;
         json_array_append_new(signals, json_string("asymmetric_in"));
         snprintf(tmp, sizeof(tmp),
-                 "talks to us a lot but rarely asks anything (%lld in / %lld out)",
+                 "queries us heavily while we rarely query them back"
+                 " (%lld inbound / %lld outbound)",
                  (long long)qin, (long long)qout);
         append_reason(reason, sizeof(reason), &rused, tmp);
     }
