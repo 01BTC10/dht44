@@ -72,19 +72,52 @@ lookup_uint(MMDB_lookup_result_s *r, json_t *out, const char *dst, const char *a
     }
 }
 
+/*
+ * Parse an IP that may be a redacted CIDR form ("87.98.162.0/24",
+ * "2001:16a2:7199::/48") or a plain IPv4/IPv6 string. Strips the
+ * "/N" suffix if present, tries AF_INET first, falls back to AF_INET6.
+ * Returns 1 on success and fills *ss + *ss_len, 0 on failure.
+ */
+static int
+parse_ip_lenient(const char *ip, struct sockaddr_storage *ss, socklen_t *ss_len)
+{
+    if (!ip || !*ip) return 0;
+    char buf[64];
+    size_t n = strnlen(ip, sizeof(buf));
+    if (n >= sizeof(buf)) return 0;
+    memcpy(buf, ip, n + 1);
+    char *slash = strchr(buf, '/');
+    if (slash) *slash = 0;
+
+    memset(ss, 0, sizeof(*ss));
+    struct sockaddr_in *sa4  = (struct sockaddr_in  *)ss;
+    struct sockaddr_in6 *sa6 = (struct sockaddr_in6 *)ss;
+    if (inet_pton(AF_INET, buf, &sa4->sin_addr) == 1) {
+        sa4->sin_family = AF_INET;
+        *ss_len = sizeof(*sa4);
+        return 1;
+    }
+    if (inet_pton(AF_INET6, buf, &sa6->sin6_addr) == 1) {
+        sa6->sin6_family = AF_INET6;
+        *ss_len = sizeof(*sa6);
+        return 1;
+    }
+    return 0;
+}
+
 static json_t *
 geoip_lookup(const char *ip)
 {
     if (!g_city_ok && !g_asn_ok) return NULL;
-    struct sockaddr_in sa;
-    memset(&sa, 0, sizeof(sa));
-    sa.sin_family = AF_INET;
-    if (inet_pton(AF_INET, ip, &sa.sin_addr) != 1) return NULL;
+    struct sockaddr_storage ss;
+    socklen_t ss_len = 0;
+    if (!parse_ip_lenient(ip, &ss, &ss_len)) return NULL;
+    struct sockaddr *sa = (struct sockaddr *)&ss;
 
     json_t *o = json_object();
     int gai = 0;
     if (g_city_ok) {
-        MMDB_lookup_result_s r = MMDB_lookup_sockaddr(&g_city, (struct sockaddr *)&sa, &gai);
+        MMDB_lookup_result_s r = MMDB_lookup_sockaddr(&g_city, sa, &gai);
         if (r.found_entry) {
             const char *p_iso[]  = { "country", "iso_code", NULL };
             const char *p_city[] = { "city", "names", "en", NULL };
@@ -108,7 +141,7 @@ geoip_lookup(const char *ip)
         }
     }
     if (g_asn_ok) {
-        MMDB_lookup_result_s r = MMDB_lookup_sockaddr(&g_asn, (struct sockaddr *)&sa, &gai);
+        MMDB_lookup_result_s r = MMDB_lookup_sockaddr(&g_asn, sa, &gai);
         if (r.found_entry) {
             lookup_uint(&r, o, "asn", "autonomous_system_number");
             MMDB_entry_data_s e;
@@ -135,13 +168,12 @@ aggregate_country_cb(const char *ip, void *closure)
 {
     struct country_bucket *tbl = closure;
     if (!g_city_ok) return 0;
-    struct sockaddr_in sa;
-    memset(&sa, 0, sizeof(sa));
-    sa.sin_family = AF_INET;
-    if (inet_pton(AF_INET, ip, &sa.sin_addr) != 1) return 0;
+    struct sockaddr_storage ss;
+    socklen_t ss_len = 0;
+    if (!parse_ip_lenient(ip, &ss, &ss_len)) return 0;
     int gai = 0;
     MMDB_lookup_result_s r =
-        MMDB_lookup_sockaddr(&g_city, (struct sockaddr *)&sa, &gai);
+        MMDB_lookup_sockaddr(&g_city, (struct sockaddr *)&ss, &gai);
     if (!r.found_entry) return 0;
     MMDB_entry_data_s e;
     const char *p_iso[] = { "country", "iso_code", NULL };

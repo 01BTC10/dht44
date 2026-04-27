@@ -1009,12 +1009,23 @@ db_select_graph_json(int limit)
             int si = cand_index_lookup(&ix, sip, sport);
             int di = cand_index_lookup(&ix, dip, dport);
             if (si >= 0 && di >= 0 && cands[si].keep && cands[di].keep) {
-                char sbuf[INET_ADDRSTRLEN+8], dbuf[INET_ADDRSTRLEN+8];
-                snprintf(sbuf, sizeof(sbuf), "%s:%d", cands[si].ip, cands[si].port);
-                snprintf(dbuf, sizeof(dbuf), "%s:%d", cands[di].ip, cands[di].port);
+                /* Redact link endpoints the same way as node IDs (above)
+                 * so that link.source / link.target match the corresponding
+                 * node.id strings. Without this, the SPA can't resolve
+                 * link endpoints to nodes (every IPv4 → /24, IPv6 → /48).
+                 * Also: emit `source`/`target` (not `src`/`dst`) — that's
+                 * the field convention the React/D3 graph layer expects. */
+                char ip_red_s[64], ip_red_d[64];
+                const char *sip_out = cands[si].ip;
+                const char *dip_out = cands[di].ip;
+                if (redact_ip(cands[si].ip, ip_red_s, sizeof(ip_red_s)) == 0) sip_out = ip_red_s;
+                if (redact_ip(cands[di].ip, ip_red_d, sizeof(ip_red_d)) == 0) dip_out = ip_red_d;
+                char sbuf[80], dbuf[80];
+                snprintf(sbuf, sizeof(sbuf), "%s:%d", sip_out, cands[si].port);
+                snprintf(dbuf, sizeof(dbuf), "%s:%d", dip_out, cands[di].port);
                 json_t *lo = json_object();
-                json_object_set_new(lo, "src", json_string(sbuf));
-                json_object_set_new(lo, "dst", json_string(dbuf));
+                json_object_set_new(lo, "source", json_string(sbuf));
+                json_object_set_new(lo, "target", json_string(dbuf));
                 json_array_append_new(links, lo);
             }
         }
@@ -1226,6 +1237,11 @@ db_select_stats_json(void)
     snprintf(sql, sizeof(sql),
         "SELECT COUNT(*) FROM queries WHERE ts >= %lld", (long long)(now - 60));
     json_object_set_new(o, "queries_per_min", json_integer(scalar_i64(sql)));
+    /* Uptime anchor: timestamp of the very first peer observation in this
+     * db. Stable across daemon restarts (only resets if observe.db is
+     * deleted). 0 if the db is fresh and no peer has been observed yet. */
+    json_object_set_new(o, "db_first_seen",
+        json_integer(scalar_i64("SELECT COALESCE(MIN(first_seen), 0) FROM peers")));
     char *js = json_dumps(o, JSON_COMPACT);
     json_decref(o);
     return js;
