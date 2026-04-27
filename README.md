@@ -1,5 +1,7 @@
 # dht44
 
+> **Live dashboard:** **[dht44.com/dashboard/peers](https://dht44.com/dashboard/peers)** · **Protocol reference + library docs:** **[dht44.com](https://dht44.com)**
+
 CLI for storing and retrieving [BEP 44](https://www.bittorrent.org/beps/bep_0044.html)
 items (mutable + immutable) on the BitTorrent Mainline DHT, in C.
 
