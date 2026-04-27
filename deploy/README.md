@@ -46,8 +46,8 @@ Prereqs: VPS with Docker + Docker Compose, ports 80/443 open,
 Tailscale installed and able to reach `ds1621.tail7aed4e.ts.net`.
 
 ```sh
-git clone ssh://git@ds1621.tail7aed4e.ts.net:4022/r2d2/bep44_dht.git
-cd bep44_dht
+git clone https://github.com/01BTC10/dht44.git
+cd dht44
 git checkout crawler
 
 # Generate Umami secrets

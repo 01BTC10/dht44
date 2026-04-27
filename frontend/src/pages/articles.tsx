@@ -29,24 +29,7 @@ const techArticle = (path: string, title: string, desc: string,
 
 /* ===== /protocol/* ===== */
 
-export const Kademlia = () => (
-  <ArticleStub
-    title="Kademlia Routing Explained: XOR Distance & k-Buckets"
-    description="How Kademlia's XOR metric, k-buckets, and iterative node lookup work — step-by-step with annotated packet traces from a real DHT crawler."
-    path="/protocol/kademlia"
-    crumbs={[
-      { label: "Home", to: "/" },
-      { label: "Protocol", to: "/protocol" },
-      { label: "Kademlia" },
-    ]}
-    jsonLd={techArticle(
-      "/protocol/kademlia",
-      "Kademlia Routing Explained: XOR Distance & k-Buckets",
-      "How Kademlia's XOR metric, k-buckets, and iterative node lookup work.",
-      "kademlia, dht, xor distance, k-bucket, node lookup, bittorrent",
-    )}
-  />
-);
+export { default as Kademlia } from "./articles/Kademlia";
 
 export const Bep5 = () => (
   <ArticleStub

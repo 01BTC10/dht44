@@ -33,7 +33,7 @@ export default function ArticleStub({ title, description, path, crumbs, jsonLd }
           Full content is being written. In the meantime, browse the{" "}
           <Link to="/protocol">protocol reference</Link>, the{" "}
           <Link to="/lib">libbep44 docs</Link>, or the{" "}
-          <a href="https://github.com/r2d2/bep44_dht">source on GitHub</a>.
+          <a href="https://github.com/01BTC10/dht44">source on GitHub</a>.
         </p>
       </ArticleLayout>
     </>

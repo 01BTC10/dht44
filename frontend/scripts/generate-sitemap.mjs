@@ -14,6 +14,7 @@ const SITE = "https://dht44.com";
 const routes = [
   { path: "/",                          priority: 1.0,  changefreq: "weekly" },
   { path: "/about",                     priority: 0.6,  changefreq: "monthly" },
+  { path: "/privacy",                   priority: 0.4,  changefreq: "yearly"  },
 
   { path: "/protocol",                  priority: 0.9,  changefreq: "monthly" },
   { path: "/protocol/kademlia",         priority: 0.9,  changefreq: "monthly" },

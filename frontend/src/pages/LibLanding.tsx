@@ -55,7 +55,7 @@ bep44_close(ctx);`}</code></pre>
 
         <h2>Source</h2>
         <p>
-          <a href="https://github.com/r2d2/bep44_dht/tree/libbep44">github.com/r2d2/bep44_dht — <code>libbep44</code> branch</a>.
+          <a href="https://github.com/01BTC10/dht44/tree/libbep44">github.com/01BTC10/dht44 — <code>libbep44</code> branch</a>.
           MIT licensed.
         </p>
       </ArticleLayout>

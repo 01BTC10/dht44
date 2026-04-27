@@ -5,6 +5,7 @@ import DashboardShell from "./components/DashboardShell";
 
 import Home         from "./pages/Home";
 import About        from "./pages/About";
+import Privacy      from "./pages/Privacy";
 import ProtocolHub  from "./pages/ProtocolHub";
 import LibLanding   from "./pages/LibLanding";
 import BlogIndex    from "./pages/BlogIndex";
@@ -29,6 +30,7 @@ export default function App() {
       <Route element={<SiteShell />}>
         <Route path="/"               element={<Home />} />
         <Route path="/about"          element={<About />} />
+        <Route path="/privacy"        element={<Privacy />} />
 
         <Route path="/protocol"           element={<ProtocolHub />} />
         <Route path="/protocol/kademlia"  element={<Kademlia />} />

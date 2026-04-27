@@ -9,7 +9,7 @@ dht44 is two things in one repository:
 1. A C implementation of the BitTorrent Mainline DHT (BEP 5) and BEP 44 mutable + immutable items, both as a CLI/daemon (`dht44`) and as an embeddable static library (`libbep44`).
 2. A live observation dashboard that watches every packet the daemon sees, classifies peers (crawler / monitor / honeypot / ok), and exposes a REST + WebSocket API plus a 3D peer-graph view.
 
-Author: Tayaout Labelle-Kuberek. Source: https://github.com/r2d2/bep44_dht.
+Author: Tayaout Labelle-Kuberek. Source: https://github.com/01BTC10/dht44.
 
 ## Protocol references
 

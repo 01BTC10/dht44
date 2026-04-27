@@ -48,7 +48,7 @@ export default function About() {
         <h2>Author and contact</h2>
         <p>
           Tayaout Labelle-Kuberek — <a href="mailto:tayaoutlk@gmail.com">tayaoutlk@gmail.com</a>.
-          Source code at <a href="https://github.com/r2d2/bep44_dht">github.com/r2d2/bep44_dht</a>.
+          Source code at <a href="https://github.com/01BTC10/dht44">github.com/01BTC10/dht44</a>.
         </p>
 
         <h2>Design goals</h2>
@@ -60,7 +60,7 @@ export default function About() {
 
         <h2>License</h2>
         <p>
-          MIT — see <a href="https://github.com/r2d2/bep44_dht/blob/main/LICENSE">LICENSE</a>.
+          MIT — see <a href="https://github.com/01BTC10/dht44/blob/main/LICENSE">LICENSE</a>.
           The vendored copy of <code>jech/dht</code> retains its upstream MIT license.
         </p>
       </ArticleLayout>

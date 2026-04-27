@@ -29,7 +29,7 @@ export default function SiteShell() {
             </NavLink>
           ))}
         </nav>
-        <a href="https://github.com/r2d2/bep44_dht"
+        <a href="https://github.com/01BTC10/dht44"
            target="_blank" rel="noreferrer noopener"
            className="gh-link">GitHub →</a>
       </header>
@@ -38,7 +38,9 @@ export default function SiteShell() {
       </main>
       <footer className="site-footer">
         <span>dht44 — BitTorrent Mainline DHT toolkit</span>
-        <span className="small">MIT licensed · <a href="https://github.com/r2d2/bep44_dht">source on GitHub</a></span>
+        <span className="small">
+          MIT · <a href="https://github.com/01BTC10/dht44">GitHub</a> · <Link to="/privacy">Privacy</Link>
+        </span>
       </footer>
     </div>
   );

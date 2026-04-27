@@ -20,7 +20,7 @@ const homeJsonLd = [
     "@id": "https://dht44.com/#org",
     name: "dht44",
     url: "https://dht44.com/",
-    sameAs: ["https://github.com/r2d2/bep44_dht"],
+    sameAs: ["https://github.com/01BTC10/dht44"],
   },
 ];
 
@@ -48,7 +48,7 @@ export default function Home() {
           <Link to="/protocol" className="cta primary">Read the protocol</Link>
           <Link to="/lib" className="cta">Embed the library</Link>
           <Link to="/dashboard/peers" className="cta">See the live network</Link>
-          <a href="https://github.com/r2d2/bep44_dht"
+          <a href="https://github.com/01BTC10/dht44"
              className="cta ghost"
              rel="noreferrer noopener">GitHub</a>
         </div>
