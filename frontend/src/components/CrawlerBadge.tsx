@@ -37,8 +37,10 @@ const POP_GAP = 6;
 
 // Delay before closing the popup after the cursor leaves both the badge
 // and the popup itself. Lets the cursor traverse the 6px gap between
-// them without flicker, and absorbs micro-jitter on re-render.
-const CLOSE_DELAY_MS = 140;
+// them without flicker, and absorbs micro-jitter on re-render. Bumped
+// from 140 → 250 ms because filter-driven re-flows of the table can
+// briefly leave the cursor outside the badge's new bounds.
+const CLOSE_DELAY_MS = 250;
 
 export function CrawlerBadge(
   { cls, score, signals, reason }:
