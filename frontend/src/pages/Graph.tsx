@@ -361,7 +361,6 @@ export default function Graph() {
             <option value={2500}>2,500</option>
             <option value={5000}>5,000</option>
             <option value={10000}>10,000</option>
-            <option value={25000}>25,000 (max — heavy)</option>
           </select>
         </label>
         <button style={{ marginLeft: 6 }} onClick={load} disabled={busy}>
