@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { stream, decodeVString, hex, fmtTs, countryFlag, countryName } from "../ws";
 import { usePaused } from "../components/HoverPause";
 import { CrawlerBadge, CrawlerClass } from "../components/CrawlerBadge";
+import ReputationChip from "../components/ReputationChip";
 
 type Geo = { country?: string; city?: string; asn?: number; asn_org?: string };
 type Row = {
@@ -24,36 +25,6 @@ type Row = {
   supports_bep51?: number | null;
   geo?: Geo;
 };
-
-/* Compact reputation chip used inline next to ip:port. Color-coded by
- * source/label so the eye reads malicious-vs-benign at a glance. */
-function RepChip({ src, label }: { src: string; label: string }) {
-  const isMalicious = src === "iblocklist"
-    || (src === "greynoise" && label.startsWith("malicious"));
-  const isBenign    = src === "greynoise" && label.startsWith("benign");
-  const isTor       = src === "tor";
-  const bg = isMalicious ? "#3a1a22"
-           : isBenign    ? "#1a2f1a"
-           : isTor       ? "#2a1a3a"
-           : "#1d2530";
-  const fg = isMalicious ? "#ff9bb5"
-           : isBenign    ? "#9be0a8"
-           : isTor       ? "#c8a8e8"
-           : "#a0a8b0";
-  const border = isMalicious ? "#562a36"
-               : isBenign    ? "#264a26"
-               : isTor       ? "#412a5a"
-               : "#2a3642";
-  return (
-    <span title={`${src}: ${label}`}
-          style={{ background: bg, color: fg,
-                   border: `1px solid ${border}`, borderRadius: 3,
-                   padding: "0 5px", marginLeft: 6, fontSize: 10,
-                   lineHeight: "14px", verticalAlign: "middle" }}>
-      {src === "iblocklist" ? label : src === "tor" ? "tor" : `gn:${label}`}
-    </span>
-  );
-}
 
 type SourceBucket = { source: string; count: number };
 
@@ -417,7 +388,7 @@ export default function Peers() {
                   )}
                   {r.reputation && Object.entries(r.reputation).map(
                     ([src, e]) => (
-                      <RepChip key={src} src={src} label={e?.label ?? "?"} />
+                      <ReputationChip key={src} source={src} entry={e} />
                     ))}
                 </td>
                 <td className="geo" title={name || undefined}>

@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import { countryFlag, countryName, decodeVString, fmtTs, hex } from "../ws";
 import { CrawlerBadge, CrawlerClass } from "./CrawlerBadge";
+import ReputationChip from "./ReputationChip";
 import type { Node } from "../pages/Graph";
 
 export default function PeerSidePanel(
@@ -105,44 +106,21 @@ export default function PeerSidePanel(
                         textTransform: "uppercase", marginBottom: 4 }}>
             external reputation
           </div>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-            {Object.entries(node.reputation).map(([src, e]) => {
-              const label = e?.label ?? "?";
-              /* Color-code by source / label so the eye reads
-               * malicious-vs-benign at a glance. */
-              const isMalicious = src === "iblocklist"
-                || (src === "greynoise" && label.startsWith("malicious"));
-              const isBenign    = src === "greynoise" && label.startsWith("benign");
-              const isTor       = src === "tor";
-              const bg = isMalicious ? "#3a1a22"
-                       : isBenign    ? "#1a2f1a"
-                       : isTor       ? "#2a1a3a"
-                       : "#1d2530";
-              const fg = isMalicious ? "#ff9bb5"
-                       : isBenign    ? "#9be0a8"
-                       : isTor       ? "#c8a8e8"
-                       : "#a0a8b0";
-              const border = isMalicious ? "#562a36"
-                           : isBenign    ? "#264a26"
-                           : isTor       ? "#412a5a"
-                           : "#2a3642";
-              return (
-                <span key={src}
-                      style={{
-                        background: bg, color: fg,
-                        border: `1px solid ${border}`,
-                        borderRadius: 3, padding: "2px 7px",
-                        fontSize: 11, lineHeight: "16px",
-                      }}>
-                  <span style={{ color: "#8892a0", marginRight: 5,
-                                 fontSize: 10, textTransform: "uppercase",
-                                 letterSpacing: 0.4 }}>
-                    {src}
-                  </span>
-                  {label}
+          {/* Side panel has plenty of room and the rows aren't
+            * ellipsified, so we render the full source:label inline.
+            * Hovering each chip still opens the same portal popup as
+            * on the Peers table. */}
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6,
+                        alignItems: "center" }}>
+            {Object.entries(node.reputation).map(([src, e]) => (
+              <span key={src} style={{ display: "inline-flex",
+                                        alignItems: "center", gap: 4 }}>
+                <ReputationChip source={src} entry={e} />
+                <span style={{ color: "#a0a8b0", fontSize: 11 }}>
+                  {e?.label}
                 </span>
-              );
-            })}
+              </span>
+            ))}
           </div>
         </div>
       )}
