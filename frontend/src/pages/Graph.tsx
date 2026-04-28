@@ -190,6 +190,25 @@ export default function Graph() {
     return { nodes, links };
   }, [data, aliveFilter, familyFilter, classFilter, bep51Only]);
 
+  /* Set of node ids directly connected to the selected node by any
+   * edge (in or out). Used by linkVisibility to hide unrelated edges
+   * and by nodeColor to dim non-neighbors so the focused subgraph
+   * pops. force-graph hydrates link.source / link.target into the
+   * actual Node object after the first sim tick, but they're still
+   * id strings before that — handle both. */
+  const neighbors = useMemo(() => {
+    if (!selected) return new Set<string>();
+    const out = new Set<string>();
+    out.add(selected.id);
+    for (const l of displayed.links) {
+      const s = typeof l.source === "string" ? l.source : (l.source as any)?.id;
+      const t = typeof l.target === "string" ? l.target : (l.target as any)?.id;
+      if (s === selected.id && t) out.add(t);
+      if (t === selected.id && s) out.add(s);
+    }
+    return out;
+  }, [selected, displayed.links]);
+
   /* Sybil cluster: when a node is selected, highlight others sharing its
    * /24 (or /48 for v6) AND/OR its ASN. Two indicators of the same hosting
    * presence — clusters jump out instantly when you click a candidate. */
@@ -425,12 +444,27 @@ export default function Graph() {
             if (n.id === selected?.id) return "#ffffff";
             if (hilite.has(n.id))      return "#ffeb3b";
             if (siblings.has(n.id))    return "#ff7ad9";
+            /* When a node is selected, dim everything that's neither
+             * the node itself nor one of its direct neighbors so the
+             * focused subgraph stands out. siblings + hilite are
+             * caught by the earlier returns; this is the fallback. */
+            if (selected && !neighbors.has(n.id)) return "#2a3340";
             return colorMode === "kbucket"
               ? colorByBucket(n, ourNodeId)
               : colorByAsn(n);
           }}
           nodeOpacity={0.95}
           nodeResolution={8}        /* sphere segments — lower = faster */
+          /* When a node is selected, render only edges touching it.
+           * Closing the side panel sets selected=null and every edge
+           * comes back. linkVisibility short-circuits before the GPU
+           * draw, so this is much cheaper than drawing-then-dimming. */
+          linkVisibility={(l: any) => {
+            if (!selected) return true;
+            const s = typeof l.source === "string" ? l.source : l.source?.id;
+            const t = typeof l.target === "string" ? l.target : l.target?.id;
+            return s === selected.id || t === selected.id;
+          }}
           linkColor={() => "rgba(160,195,235,0.6)"}
           linkOpacity={0.55}
           linkWidth={1.2}
