@@ -225,8 +225,6 @@ sl_insert(struct worker *w, const struct sockaddr *peer, socklen_t peerlen,
             return i;
         }
     }
-    if (w->sl_count >= CRAWL_SHORTLIST) return -1;
-
     struct cand c = {0};
     memcpy(&c.peer, peer, peerlen);
     c.peerlen = peerlen;
@@ -235,11 +233,43 @@ sl_insert(struct worker *w, const struct sockaddr *peer, socklen_t peerlen,
         memcpy(c.id, id_or_null, BEP44_NODE_ID_LEN);
         c.has_id = 1;
     }
-    /* position by XOR order */
+    /* Sorted-insertion position (0 = closest, count = farthest). */
     int pos = w->sl_count;
     for (int i = 0; i < w->sl_count; i++) {
         if (xor_cmp(&c, &w->sl[i], w->target) < 0) { pos = i; break; }
     }
+
+    if (w->sl_count >= CRAWL_SHORTLIST) {
+        /* Mirror of the lookup.c fix (commit 48a3958). When the
+         * shortlist is full, evict the farthest FRESH entry to make
+         * room — only if the new candidate is closer than it.
+         * INFLIGHT / RESPONDED / FAILED stay so top_k_done counting
+         * and the worker's per-tick bookkeeping remain coherent.
+         * Without this, the worker dead-ends in its seed neighborhood
+         * and never iterates outward toward the actual closest peers,
+         * which truncates per-walk peer discovery and biases BEP 51
+         * sample_infohashes coverage toward the same ring.
+         *
+         * inflight_idx is INFLIGHT-stated, so it's never the eviction
+         * target — but eviction's memmove can shift it. Adjust the
+         * stored index when the affected window crosses it. */
+        int evict = -1;
+        for (int i = w->sl_count - 1; i >= 0; i--) {
+            if (w->sl[i].state == CAND_FRESH) { evict = i; break; }
+        }
+        if (evict < 0) return -1;          /* nothing evictable */
+        if (pos > evict) return -1;        /* candidate isn't closer */
+        if (evict > pos) {
+            memmove(&w->sl[pos + 1], &w->sl[pos],
+                    sizeof(w->sl[0]) * (size_t)(evict - pos));
+            if (w->inflight_idx >= pos && w->inflight_idx < evict)
+                w->inflight_idx++;
+        }
+        w->sl[pos] = c;
+        return pos;
+    }
+
+    /* Not full — normal insert. */
     if (pos < w->sl_count) {
         memmove(&w->sl[pos + 1], &w->sl[pos],
                 sizeof(w->sl[0]) * (size_t)(w->sl_count - pos));
