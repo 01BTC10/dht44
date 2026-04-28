@@ -17,6 +17,9 @@ log.txt
 /frontend/node_modules
 /frontend/dist
 
+# og:image renderer (puppeteer pulls a ~250 MB chromium)
+/og/node_modules
+
 # claude-code session metadata
 .claude/
 

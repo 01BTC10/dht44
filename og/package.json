@@ -1,0 +1,13 @@
+{
+  "name": "dht44-og",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Headless render of the dashboard for og:image / twitter:image. Driven by systemd timer (see deploy/systemd/dht44-og.{service,timer}).",
+  "scripts": {
+    "render": "node render.mjs"
+  },
+  "dependencies": {
+    "puppeteer": "^23.0.0"
+  }
+}

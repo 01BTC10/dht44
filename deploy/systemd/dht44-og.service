@@ -1,0 +1,22 @@
+[Unit]
+Description=dht44 og:image renderer (headless screenshot of the dashboard)
+Documentation=file:///home/r2d2/dht44-crawler/og/render.mjs
+Wants=network-online.target
+After=network-online.target dht44.service
+
+[Service]
+Type=oneshot
+User=r2d2
+Group=r2d2
+WorkingDirectory=/home/r2d2/dht44-crawler/og
+ExecStart=/usr/bin/node /home/r2d2/dht44-crawler/og/render.mjs
+TimeoutStartSec=120
+
+# Light hardening — chromium itself sandboxes its renderers; this service
+# just needs to read its own files, network, and overwrite a single file
+# under /var/www that we pre-create with the correct ownership.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/var/www/dht44.com /home/r2d2/.cache/puppeteer /home/r2d2/dht44-crawler/og

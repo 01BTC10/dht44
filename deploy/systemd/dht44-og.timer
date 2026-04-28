@@ -1,0 +1,14 @@
+[Unit]
+Description=Refresh dht44.com og:image once a day
+Documentation=file:///home/r2d2/dht44-crawler/deploy/systemd/dht44-og.service
+
+[Timer]
+# Render once at boot (after a 5 min stabilisation delay) and then daily.
+OnBootSec=5min
+OnCalendar=daily
+Persistent=true
+RandomizedDelaySec=15min
+Unit=dht44-og.service
+
+[Install]
+WantedBy=timers.target
