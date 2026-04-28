@@ -56,8 +56,9 @@ struct lookup_node {
 
 struct query_slot {
     lookup_run *L;
-    int         node_idx;
     int         in_use;
+    struct sockaddr_storage peer;
+    socklen_t   peerlen;
     struct timeval send_tv;     /* wall-clock at send, for RTT */
 };
 
@@ -148,8 +149,6 @@ shortlist_insert(lookup_run *L, const uint8_t *id_or_null,
             return -1;
         }
     }
-    if (L->shortlist_count >= LOOKUP_SHORTLIST) return -1;
-
     struct lookup_node n = {0};
     memcpy(&n.peer, peer, peerlen);
     n.peerlen = peerlen;
@@ -158,7 +157,8 @@ shortlist_insert(lookup_run *L, const uint8_t *id_or_null,
         memcpy(n.id, id_or_null, BEP44_NODE_ID_LEN);
         n.has_id = 1;
     }
-    /* find position by XOR */
+
+    /* Sorted-insertion position (0 = closest, count = farthest). */
     int pos = L->shortlist_count;
     for (int i = 0; i < L->shortlist_count; i++) {
         if (xor_cmp(&n, &L->shortlist[i], L->target) < 0) {
@@ -166,7 +166,27 @@ shortlist_insert(lookup_run *L, const uint8_t *id_or_null,
             break;
         }
     }
-    /* shift right */
+
+    if (L->shortlist_count >= LOOKUP_SHORTLIST) {
+        /* Evict the farthest FRESH entry to make room — only if the new
+         * candidate is closer than it. INFLIGHT/RESPONDED/FAILED entries
+         * stay so per-slot peer→entry lookups and top_k_done counting
+         * remain coherent across in-flight queries. */
+        int evict = -1;
+        for (int i = L->shortlist_count - 1; i >= 0; i--) {
+            if (L->shortlist[i].state == NODE_FRESH) { evict = i; break; }
+        }
+        if (evict < 0) return -1;          /* nothing evictable */
+        if (pos > evict) return -1;        /* candidate isn't closer */
+        if (evict > pos) {
+            memmove(&L->shortlist[pos + 1], &L->shortlist[pos],
+                    sizeof(*L->shortlist) * (size_t)(evict - pos));
+        }
+        L->shortlist[pos] = n;
+        return pos;
+    }
+
+    /* Not full — normal insert. */
     if (pos < L->shortlist_count) {
         memmove(&L->shortlist[pos + 1], &L->shortlist[pos],
                 sizeof(*L->shortlist) * (size_t)(L->shortlist_count - pos));
@@ -244,13 +264,19 @@ top_k_done(const lookup_run *L)
  * ============================================================ */
 
 static struct query_slot *
-slot_acquire(lookup_run *L, int node_idx)
+slot_acquire(lookup_run *L,
+             const struct sockaddr *peer, socklen_t peerlen)
 {
+    if (peerlen <= 0
+        || peerlen > (socklen_t)sizeof(struct sockaddr_storage)) {
+        return NULL;
+    }
     for (int i = 0; i < LOOKUP_ALPHA; i++) {
         if (!L->slots[i].in_use) {
-            L->slots[i].in_use  = 1;
-            L->slots[i].L       = L;
-            L->slots[i].node_idx = node_idx;
+            L->slots[i].in_use = 1;
+            L->slots[i].L = L;
+            memcpy(&L->slots[i].peer, peer, peerlen);
+            L->slots[i].peerlen = peerlen;
             return &L->slots[i];
         }
     }
@@ -262,7 +288,7 @@ slot_release(struct query_slot *s)
 {
     s->in_use = 0;
     s->L = NULL;
-    s->node_idx = -1;
+    s->peerlen = 0;
 }
 
 /* ============================================================
@@ -281,7 +307,8 @@ static void
 send_to(lookup_run *L, int node_idx)
 {
     struct lookup_node *n = &L->shortlist[node_idx];
-    struct query_slot *slot = slot_acquire(L, node_idx);
+    struct query_slot *slot = slot_acquire(L,
+        (const struct sockaddr *)&n->peer, n->peerlen);
     if (!slot) return;
 
     uint8_t tid[2];
@@ -453,7 +480,6 @@ on_tx(bep44_tx_event ev,
     (void)peerlen; (void)e;
     struct query_slot *slot = closure;
     lookup_run *L = slot ? slot->L : NULL;
-    int node_idx = slot ? slot->node_idx : -1;
     if (!L) return;
 
     /* RTT sample (milliseconds) — computed before slot_release. */
@@ -466,10 +492,27 @@ on_tx(bep44_tx_event ev,
         if (dms >= 0 && dms < 60000) rtt_ms = (int)dms;
     }
 
+    /* Find the shortlist entry by peer address — its index may have shifted
+     * since slot_acquire (later inserts/evictions move sorted entries).
+     * Returns -1 if the entry was evicted while in flight; the response
+     * still flows through (nodes/values/tokens) but no per-entry state
+     * update happens. */
+    int node_idx = -1;
+    if (slot) {
+        for (int i = 0; i < L->shortlist_count; i++) {
+            if (L->shortlist[i].peerlen == slot->peerlen
+                && sa_eq((const struct sockaddr *)&L->shortlist[i].peer,
+                         (const struct sockaddr *)&slot->peer)) {
+                node_idx = i;
+                break;
+            }
+        }
+    }
+
     if (L->in_flight > 0) L->in_flight--;
     if (slot) slot_release(slot);
 
-    if (node_idx >= 0 && node_idx < L->shortlist_count) {
+    if (node_idx >= 0) {
         L->shortlist[node_idx].state = (ev == BEP44_TX_RESPONSE)
                                        ? NODE_RESPONDED : NODE_FAILED;
     }
