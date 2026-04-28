@@ -71,12 +71,15 @@ export default function Peers() {
         .then(guarded(setRows)).catch(() => {});
       fetch("/api/stats").then(r => r.json())
         .then(guarded((s: any) => setTotal(s.peers))).catch(() => {});
-      fetch("/api/client-stats?limit=12").then(r => r.json())
+      /* Pull the full list (server caps at 500) — the .bars panel is
+       * height-capped + scrollable, so the user can browse everything
+       * we've seen, not just the head of the distribution. */
+      fetch("/api/client-stats?limit=500").then(r => r.json())
         .then(guarded((s: any) => {
           setClients(s.clients ?? []);
           setClientKnown(s.known ?? null);
         })).catch(() => {});
-      fetch("/api/country-stats?limit=15").then(r => r.json())
+      fetch("/api/country-stats?limit=500").then(r => r.json())
         .then(guarded((s: any) => {
           setCountries(s.countries ?? []);
           setCountryKnown(s.known ?? null);
