@@ -6,18 +6,14 @@
  *   - Canonical URL
  *   - Open Graph + Twitter cards
  *   - JSON-LD (single object or array — caller picks)
- *   - Umami analytics beacon, gated by VITE_UMAMI_WEBSITE_ID
  *
- * The site origin is fixed at SITE — change once at deploy time.
+ * Analytics: relies on Cloudflare Web Analytics, which the CF proxy
+ * auto-injects. No app-side beacon.
  */
 
 import { Helmet } from "react-helmet-async";
 
 const SITE = "https://dht44.com";
-
-/* Read at build time. Empty string if not set → no Umami beacon. */
-const UMAMI_ORIGIN  = (import.meta.env.VITE_UMAMI_ORIGIN  as string | undefined) ?? "";
-const UMAMI_WEBSITE = (import.meta.env.VITE_UMAMI_WEBSITE_ID as string | undefined) ?? "";
 
 type SEOProps = {
   title: string;
@@ -74,15 +70,6 @@ export default function SEO({
           {JSON.stringify(ld)}
         </script>
       ))}
-
-      {/* Umami analytics — env-gated, no-op if not configured. */}
-      {UMAMI_ORIGIN && UMAMI_WEBSITE && (
-        <script
-          defer
-          src={`${UMAMI_ORIGIN}/script.js`}
-          data-website-id={UMAMI_WEBSITE}
-        />
-      )}
     </Helmet>
   );
 }

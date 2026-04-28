@@ -26,23 +26,23 @@ export default function Privacy() {
         <h3>What we collect</h3>
         <ul>
           <li>
-            <strong>Anonymized analytics</strong> via{" "}
-            <a href="https://umami.is/">Umami</a>, self-hosted on the same
-            infrastructure as this site. Umami logs page URL, referrer,
-            screen size, browser/OS, and country (derived from a hashed,
-            daily-rotated IP — the IP itself is never stored). No cookies,
-            no localStorage, no cross-site tracking. Honors{" "}
-            <code>Sec-GPC: 1</code> (Global Privacy Control) by suppressing
-            the page-view.
+            <strong>Cloudflare Web Analytics</strong>, auto-injected by
+            the CF proxy. Cloudflare's analytics is cookieless, samples
+            page URL, referrer, viewport, browser/OS, and country
+            (derived from the request's edge IP, which Cloudflare does
+            not store in the analytics dataset). No cross-site tracking,
+            no advertising profile linkage. Cloudflare's privacy
+            documentation describes the full retention and processing
+            model.
           </li>
           <li>
-            <strong>Cloudflare</strong> sits in front of the site for DNS,
-            edge TLS, and bot management. Cloudflare sets a single cookie,
-            <code>__cf_bm</code>, classified by Cloudflare as
-            "strictly necessary" — it expires after 30 minutes and is
+            <strong>Cloudflare</strong> also sits in front of the site
+            for DNS, edge TLS, and bot management. Cloudflare sets a
+            single cookie, <code>__cf_bm</code>, classified by Cloudflare
+            as "strictly necessary" — it expires after 30 minutes and is
             scoped to bot detection, not advertising. We do not use
-            Cloudflare Turnstile or any other CF challenge feature on this
-            site.
+            Cloudflare Turnstile or any other CF challenge feature on
+            this site.
           </li>
           <li>
             <strong>Server logs.</strong> nginx access logs include the
@@ -166,7 +166,6 @@ export default function Privacy() {
             a static copy of any non-personalized response.</li>
           <li>The crawler database lives on the same operator's residential
             ISP connection in (jurisdiction). It does not leave that machine.</li>
-          <li>The Umami analytics database is on the VPS, not Cloudflare.</li>
           <li>
             The operator is in (jurisdiction) and is the data controller for
             the purposes of GDPR.
