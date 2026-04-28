@@ -626,6 +626,150 @@ db_count_peers_since(int64_t since_ts)
     return n;
 }
 
+/* Closest-N alive peers by XOR distance to target (see db.h).
+ *
+ * Implementation: stream the (ip, port, node_id) of every peer matching the
+ * family + freshness filter, maintain a max-heap of size n_max keyed on XOR
+ * distance, replace the heap root whenever a closer candidate appears. At
+ * end, sort the heap ascending by distance.
+ *
+ * Cost: full scan of the freshness-filtered slice of `peers` (uses the
+ * peers_last index for the WHERE), bounded heap ops per row. For ~30K alive
+ * rows + n_max=64 this is ~10ms wall time on this VPS. Called only on
+ * worker reseed (a few times per minute total across all workers), so the
+ * cost is negligible against a 50 pps probe budget. */
+struct closest_cand {
+    uint8_t                 dist[BEP44_NODE_ID_LEN];
+    struct sockaddr_storage addr;
+    int                     len;
+    uint8_t                 id[BEP44_NODE_ID_LEN];
+};
+
+static int
+dist_cmp(const uint8_t a[BEP44_NODE_ID_LEN], const uint8_t b[BEP44_NODE_ID_LEN])
+{
+    return memcmp(a, b, BEP44_NODE_ID_LEN);
+}
+
+/* Max-heap on dist: heap[0] is the worst (largest distance) candidate. */
+static void
+heap_sift_down(struct closest_cand *heap, int n, int i)
+{
+    while (1) {
+        int l = 2 * i + 1, r = 2 * i + 2, largest = i;
+        if (l < n && dist_cmp(heap[l].dist, heap[largest].dist) > 0) largest = l;
+        if (r < n && dist_cmp(heap[r].dist, heap[largest].dist) > 0) largest = r;
+        if (largest == i) return;
+        struct closest_cand tmp = heap[i];
+        heap[i] = heap[largest];
+        heap[largest] = tmp;
+        i = largest;
+    }
+}
+
+static void
+heap_sift_up(struct closest_cand *heap, int i)
+{
+    while (i > 0) {
+        int parent = (i - 1) / 2;
+        if (dist_cmp(heap[i].dist, heap[parent].dist) <= 0) return;
+        struct closest_cand tmp = heap[i];
+        heap[i] = heap[parent];
+        heap[parent] = tmp;
+        i = parent;
+    }
+}
+
+static int
+ascending_dist_qsort_cmp(const void *a, const void *b)
+{
+    const struct closest_cand *ca = a, *cb = b;
+    return dist_cmp(ca->dist, cb->dist);
+}
+
+int
+db_select_closest_alive(int family,
+                        const uint8_t target[BEP44_NODE_ID_LEN],
+                        int64_t fresh_threshold,
+                        int n_max,
+                        struct sockaddr_storage *out_addrs,
+                        int *out_lens,
+                        uint8_t (*out_ids)[BEP44_NODE_ID_LEN])
+{
+    if (!g_db || !target || !out_addrs || !out_lens || !out_ids || n_max <= 0)
+        return 0;
+    if (family != AF_INET && family != AF_INET6) return 0;
+
+    /* Family-targeted row filter at SQL level: v6 IPs always contain ':',
+     * v4 IPs never do. Cheap and avoids parsing rows we'd discard. */
+    const char *sql = (family == AF_INET)
+        ? "SELECT ip, port, node_id FROM peers"
+          " WHERE last_seen >= ? AND node_id IS NOT NULL AND ip NOT LIKE '%:%'"
+        : "SELECT ip, port, node_id FROM peers"
+          " WHERE last_seen >= ? AND node_id IS NOT NULL AND ip LIKE '%:%'";
+
+    sqlite3_stmt *s = NULL;
+    if (sqlite3_prepare_v2(g_db, sql, -1, &s, NULL) != SQLITE_OK) return 0;
+    sqlite3_bind_int64(s, 1, fresh_threshold);
+
+    struct closest_cand *heap = calloc((size_t)n_max, sizeof(*heap));
+    if (!heap) { sqlite3_finalize(s); return 0; }
+    int heap_n = 0;
+
+    while (sqlite3_step(s) == SQLITE_ROW) {
+        const char *ip   = (const char *)sqlite3_column_text(s, 0);
+        int         port = sqlite3_column_int(s, 1);
+        const void *id   = sqlite3_column_blob(s, 2);
+        int         idn  = sqlite3_column_bytes(s, 2);
+        if (!ip || idn != BEP44_NODE_ID_LEN) continue;
+
+        struct sockaddr_storage ss = {0};
+        int ss_len = 0;
+        if (family == AF_INET) {
+            struct sockaddr_in *sa = (struct sockaddr_in *)&ss;
+            if (inet_pton(AF_INET, ip, &sa->sin_addr) != 1) continue;
+            sa->sin_family = AF_INET;
+            sa->sin_port   = htons((uint16_t)port);
+            ss_len = sizeof(*sa);
+        } else {
+            struct sockaddr_in6 *sa = (struct sockaddr_in6 *)&ss;
+            if (inet_pton(AF_INET6, ip, &sa->sin6_addr) != 1) continue;
+            sa->sin6_family = AF_INET6;
+            sa->sin6_port   = htons((uint16_t)port);
+            ss_len = sizeof(*sa);
+        }
+
+        uint8_t dist[BEP44_NODE_ID_LEN];
+        const uint8_t *idb = (const uint8_t *)id;
+        for (int i = 0; i < BEP44_NODE_ID_LEN; i++) dist[i] = idb[i] ^ target[i];
+
+        if (heap_n < n_max) {
+            memcpy(heap[heap_n].dist, dist, BEP44_NODE_ID_LEN);
+            heap[heap_n].addr = ss;
+            heap[heap_n].len  = ss_len;
+            memcpy(heap[heap_n].id, idb, BEP44_NODE_ID_LEN);
+            heap_sift_up(heap, heap_n);
+            heap_n++;
+        } else if (dist_cmp(dist, heap[0].dist) < 0) {
+            memcpy(heap[0].dist, dist, BEP44_NODE_ID_LEN);
+            heap[0].addr = ss;
+            heap[0].len  = ss_len;
+            memcpy(heap[0].id, idb, BEP44_NODE_ID_LEN);
+            heap_sift_down(heap, heap_n, 0);
+        }
+    }
+    sqlite3_finalize(s);
+
+    qsort(heap, (size_t)heap_n, sizeof(*heap), ascending_dist_qsort_cmp);
+    for (int i = 0; i < heap_n; i++) {
+        out_addrs[i] = heap[i].addr;
+        out_lens[i]  = heap[i].len;
+        memcpy(out_ids[i], heap[i].id, BEP44_NODE_ID_LEN);
+    }
+    free(heap);
+    return heap_n;
+}
+
 /* Fill `out` with up to `max` (ip,port) entries whose last_pinged is NULL or
  * older than `older_than_ts`, oldest first. Returns the number filled. */
 int

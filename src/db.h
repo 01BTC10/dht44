@@ -109,6 +109,20 @@ int64_t db_count_bep44(void);
  * stats endpoint to populate "alive in last N hours" buckets. */
 int64_t db_count_peers_since(int64_t since_ts);
 
+/* Closest-N alive peers of `family` (AF_INET or AF_INET6) by XOR distance to
+ * `target`. Considers only rows with a known node_id and last_seen >=
+ * fresh_threshold. Returns the count actually filled (<= n_max). Used by the
+ * crawler's reseed path: peers we have directly observed talking recently are
+ * a much better seed than jech's routing-table snapshot, which can hold
+ * long-stale entries that drag down a walk's first few hops. */
+int db_select_closest_alive(int family,
+                            const uint8_t target[BEP44_NODE_ID_LEN],
+                            int64_t fresh_threshold,
+                            int n_max,
+                            struct sockaddr_storage *out_addrs,
+                            int *out_lens,
+                            uint8_t (*out_ids)[BEP44_NODE_ID_LEN]);
+
 /* Liveness sweeper helpers. */
 int  db_select_liveness_candidates(int max, int64_t older_than_ts,
                                    struct sockaddr_storage *out, int *out_lens);

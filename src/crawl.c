@@ -21,6 +21,14 @@
 #define CRAWL_SHORTLIST     64          /* candidate cap per walk */
 #define CRAWL_TOP_K         20          /* termination: top-K all terminated */
 #define CRAWL_TX_TIMEOUT_MS 3000
+/* Prefer seeds we observed alive within this window when reseeding a walk.
+ * jech's routing table can hold long-stale entries that pollute the first
+ * few hops; the peers table is the source of truth for who answered us
+ * recently. If the DB returns fewer than CRAWL_SEED_DB_MIN candidates, we
+ * fall back to the routing table so cold-start / sparse-zone walks aren't
+ * crippled. */
+#define CRAWL_SEED_FRESH_S  3600
+#define CRAWL_SEED_DB_MIN   16
 
 enum {
     CAND_FRESH     = 0,
@@ -351,8 +359,18 @@ rand_target(uint8_t t[BEP44_NODE_ID_LEN])
     randombytes_buf(t, BEP44_NODE_ID_LEN);
 }
 
-/* Reset the worker for a new random target; re-seed shortlist from jech's
- * routing table (the one that matches the worker's family). */
+/* Reset the worker for a new random target; re-seed shortlist.
+ *
+ * Seed source: prefer peers we directly observed alive within the last
+ * CRAWL_SEED_FRESH_S seconds (the `peers` table). These are by definition
+ * peers that answered KRPC in our recent past, so the walk's first few
+ * hops are far less likely to time out than they would be if seeded purely
+ * from jech's routing table snapshot.
+ *
+ * Fallback to jech: if the DB returns fewer than CRAWL_SEED_DB_MIN
+ * candidates (cold start, freshly pruned, sparse v6 zone, etc.) we use
+ * the routing table directly. This mirrors the prior behaviour and keeps
+ * workers productive while the DB warms up. */
 static void
 worker_reseed(struct worker *w)
 {
@@ -360,6 +378,22 @@ worker_reseed(struct worker *w)
     w->sl_count = 0;
     w->hops = 0;
     w->inflight_idx = -1;
+
+    int64_t fresh = (int64_t)time(NULL) - CRAWL_SEED_FRESH_S;
+    struct sockaddr_storage db_addrs[CRAWL_SHORTLIST];
+    int                     db_lens [CRAWL_SHORTLIST];
+    uint8_t                 db_ids  [CRAWL_SHORTLIST][BEP44_NODE_ID_LEN];
+    int n_db = db_select_closest_alive(w->family, w->target, fresh,
+                                       CRAWL_SHORTLIST,
+                                       db_addrs, db_lens, db_ids);
+
+    if (n_db >= CRAWL_SEED_DB_MIN) {
+        for (int i = 0; i < n_db; i++) {
+            sl_insert(w, (const struct sockaddr *)&db_addrs[i],
+                      (socklen_t)db_lens[i], db_ids[i]);
+        }
+        return;
+    }
 
     if (w->family == AF_INET) {
         struct sockaddr_in seed[CRAWL_SHORTLIST];
