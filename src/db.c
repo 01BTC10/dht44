@@ -1058,6 +1058,15 @@ db_select_graph_json(int limit)
         int     overall_deg;
         int     internal_deg;
         int     keep;            /* set if this candidate makes the final cut */
+        /* Redaction collision handling (see post-keep dedupe pass below).
+         * Two distinct peers in the same /24 with the same port produce
+         * the same redacted id ("X.Y.Z.0/24:NNNN"). The first kept cand
+         * with a given redacted id is canonical (alias_of < 0); later
+         * cands point at it via alias_of and have their fields summed
+         * into the canonical's. Only the canonical is emitted as a node;
+         * edges referencing aliases re-target to the canonical. */
+        int     alias_of;        /* -1 = canonical; else cand index */
+        int     merged_count;    /* canonical only: 1 + #aliases */
         const void *v;            /* pointer into the row's blob — copied later */
         int     v_len;
         const void *node_id;      /* 20-byte blob copied here from peers row */
@@ -1075,6 +1084,13 @@ db_select_graph_json(int limit)
     cand_t *cands = calloc((size_t)cand_limit, sizeof(*cands));
     if (!cands) return NULL;
     int cand_n = 0;
+    /* calloc zeroed alias_of; we want -1 (no alias) by default so the
+     * post-keep dedupe pass can distinguish "untouched canonical" from
+     * "alias of cand 0". */
+    for (int i = 0; i < cand_limit; i++) {
+        cands[i].alias_of     = -1;
+        cands[i].merged_count = 1;
+    }
 
     /* --- Pass 1: candidate set by overall degree ------------------- */
     sqlite3_stmt *s = NULL;
@@ -1223,10 +1239,71 @@ db_select_graph_json(int limit)
         sqlite3_finalize(e);
     }
 
+    /* --- Redaction-collision dedupe ----------------------------------
+     * When peer-IP redaction is on (the default), distinct real peers in
+     * the same /24 (or /48 for v6) with the same port produce identical
+     * node ids — "178.162.173.0/24:28001" might cover several real
+     * hosts. Without dedupe the JSON carries duplicate-key node objects;
+     * React/force-graph silently keeps one and drops the rest, leaving
+     * the dropped peers' edges unattached and rendering as orphans.
+     *
+     * Group kept cands by their would-be node id. Per group:
+     *   * first kept cand becomes canonical (alias_of stays -1)
+     *   * subsequent cands set alias_of = canonical_idx; their
+     *     internal_deg / as_src / as_dst / queries_in / queries_out
+     *     / same_ip get added to canonical (preserving "what this dot
+     *     represents" semantics)
+     *   * canonical's merged_count is incremented per alias
+     *
+     * Linear scan: kept set is at most `limit` (default 300, max 25k).
+     * For 25k * 25k worst case that's 600M compares — slow but rare.
+     * Default sized runs are <100k compares. Skip the hash overhead. */
+    {
+        int kept_idx[cand_n];
+        char kept_id[cand_n][80];
+        int  kept_count = 0;
+        for (int i = 0; i < cand_n; i++) {
+            if (!cands[i].keep) continue;
+            kept_idx[kept_count] = i;
+            char ip_red[64];
+            const char *ip_out = cands[i].ip;
+            if (redact_ip(cands[i].ip, ip_red, sizeof(ip_red)) == 0)
+                ip_out = ip_red;
+            snprintf(kept_id[kept_count], 80, "%s:%d", ip_out, cands[i].port);
+            kept_count++;
+        }
+        for (int j = 0; j < kept_count; j++) {
+            if (cands[kept_idx[j]].alias_of >= 0) continue;
+            for (int k = j + 1; k < kept_count; k++) {
+                if (cands[kept_idx[k]].alias_of >= 0) continue;
+                if (strcmp(kept_id[j], kept_id[k]) != 0) continue;
+                /* k is an alias of j. Merge fields, drop k from emit. */
+                int ji = kept_idx[j], ki = kept_idx[k];
+                cands[ki].alias_of      = ji;
+                cands[ji].merged_count += 1;
+                cands[ji].internal_deg += cands[ki].internal_deg;
+                cands[ji].as_src       += cands[ki].as_src;
+                cands[ji].as_dst       += cands[ki].as_dst;
+                cands[ji].queries_in   += cands[ki].queries_in;
+                cands[ji].queries_out  += cands[ki].queries_out;
+                /* same_ip: max() so it still represents "ports on a single
+                 * /24 redaction bucket" without overcounting overlap. */
+                if (cands[ki].same_ip > cands[ji].same_ip)
+                    cands[ji].same_ip = cands[ki].same_ip;
+                if (cands[ki].first_seen && (!cands[ji].first_seen
+                    || cands[ki].first_seen < cands[ji].first_seen))
+                    cands[ji].first_seen = cands[ki].first_seen;
+                if (cands[ki].last_seen > cands[ji].last_seen)
+                    cands[ji].last_seen = cands[ki].last_seen;
+            }
+        }
+    }
+
     /* --- Emit JSON for kept nodes -------------------------------- */
     json_t *nodes = json_array();
     for (int i = 0; i < cand_n; i++) {
         if (!cands[i].keep) continue;
+        if (cands[i].alias_of >= 0) continue;       /* merged into canonical */
         char ip_red[64];
         const char *ip_out = cands[i].ip;
         if (redact_ip(cands[i].ip, ip_red, sizeof(ip_red)) == 0) ip_out = ip_red;
@@ -1236,6 +1313,7 @@ db_select_graph_json(int limit)
         json_object_set_new(o, "id",   json_string(id));
         json_object_set_new(o, "ip",   json_string(ip_out));
         json_object_set_new(o, "port", json_integer(cands[i].port));
+        json_object_set_new(o, "merged_count", json_integer(cands[i].merged_count));
         /* "deg" reports the in-result degree — what the user actually sees. */
         json_object_set_new(o, "deg",  json_integer(cands[i].internal_deg));
         json_set_blob_hex(o, "v_string", cands[i].v, cands[i].v_len);
@@ -1264,8 +1342,23 @@ db_select_graph_json(int limit)
         cands[i].node_json = o;     /* pointer ref, owned by `nodes` */
     }
 
-    /* --- Emit edges between kept nodes --------------------------- */
+    /* --- Emit edges between kept nodes ---------------------------
+     * Redaction can collapse multiple distinct (src, dst) edges into
+     * the same (src_redacted, dst_redacted) pair; dedupe via a jansson
+     * object used as a hash set keyed on "src|dst". Self-loops created
+     * by redaction (real edge A→B where A and B share a /24 + port)
+     * are skipped. Aliases get re-targeted to their canonical so the
+     * link references match what node emission produced.
+     *
+     * Track effective deg during this pass and patch each canonical
+     * node JSON afterwards so `deg` matches what's actually rendered.
+     * The earlier internal_deg recount was correct for the kept set
+     * BEFORE redaction collapse; here we adjust for the merged view. */
+    for (int i = 0; i < cand_n; i++)
+        if (cands[i].keep && cands[i].alias_of < 0)
+            cands[i].internal_deg = 0;
     json_t *links = json_array();
+    json_t *seen  = json_object();              /* "src|dst" → 1 */
     if (sqlite3_prepare_v2(g_db,
             "SELECT src_ip,src_port,dst_ip,dst_port FROM edges",
             -1, &e, NULL) == SQLITE_OK) {
@@ -1276,28 +1369,44 @@ db_select_graph_json(int limit)
             int dport = sqlite3_column_int(e, 3);
             int si = cand_index_lookup(&ix, sip, sport);
             int di = cand_index_lookup(&ix, dip, dport);
-            if (si >= 0 && di >= 0 && cands[si].keep && cands[di].keep) {
-                /* Redact link endpoints the same way as node IDs (above)
-                 * so that link.source / link.target match the corresponding
-                 * node.id strings. Without this, the SPA can't resolve
-                 * link endpoints to nodes (every IPv4 → /24, IPv6 → /48).
-                 * Also: emit `source`/`target` (not `src`/`dst`) — that's
-                 * the field convention the React/D3 graph layer expects. */
-                char ip_red_s[64], ip_red_d[64];
-                const char *sip_out = cands[si].ip;
-                const char *dip_out = cands[di].ip;
-                if (redact_ip(cands[si].ip, ip_red_s, sizeof(ip_red_s)) == 0) sip_out = ip_red_s;
-                if (redact_ip(cands[di].ip, ip_red_d, sizeof(ip_red_d)) == 0) dip_out = ip_red_d;
-                char sbuf[80], dbuf[80];
-                snprintf(sbuf, sizeof(sbuf), "%s:%d", sip_out, cands[si].port);
-                snprintf(dbuf, sizeof(dbuf), "%s:%d", dip_out, cands[di].port);
-                json_t *lo = json_object();
-                json_object_set_new(lo, "source", json_string(sbuf));
-                json_object_set_new(lo, "target", json_string(dbuf));
-                json_array_append_new(links, lo);
-            }
+            if (si < 0 || di < 0)                      continue;
+            if (!cands[si].keep || !cands[di].keep)    continue;
+            if (cands[si].alias_of >= 0) si = cands[si].alias_of;
+            if (cands[di].alias_of >= 0) di = cands[di].alias_of;
+
+            char ip_red_s[64], ip_red_d[64];
+            const char *sip_out = cands[si].ip;
+            const char *dip_out = cands[di].ip;
+            if (redact_ip(cands[si].ip, ip_red_s, sizeof(ip_red_s)) == 0) sip_out = ip_red_s;
+            if (redact_ip(cands[di].ip, ip_red_d, sizeof(ip_red_d)) == 0) dip_out = ip_red_d;
+            char sbuf[80], dbuf[80];
+            snprintf(sbuf, sizeof(sbuf), "%s:%d", sip_out, cands[si].port);
+            snprintf(dbuf, sizeof(dbuf), "%s:%d", dip_out, cands[di].port);
+            if (strcmp(sbuf, dbuf) == 0) continue;     /* redaction self-loop */
+
+            char keybuf[176];
+            snprintf(keybuf, sizeof(keybuf), "%s|%s", sbuf, dbuf);
+            if (json_object_get(seen, keybuf)) continue;
+            json_object_set_new(seen, keybuf, json_true());
+
+            cands[si].internal_deg++;
+            cands[di].internal_deg++;
+
+            json_t *lo = json_object();
+            json_object_set_new(lo, "source", json_string(sbuf));
+            json_object_set_new(lo, "target", json_string(dbuf));
+            json_array_append_new(links, lo);
         }
         sqlite3_finalize(e);
+    }
+    json_decref(seen);
+
+    /* Patch each canonical node's `deg` field with the post-dedupe count. */
+    for (int i = 0; i < cand_n; i++) {
+        if (!cands[i].keep || cands[i].alias_of >= 0) continue;
+        if (!cands[i].node_json) continue;
+        json_object_set_new(cands[i].node_json, "deg",
+                            json_integer(cands[i].internal_deg));
     }
 
     cand_index_free(&ix);

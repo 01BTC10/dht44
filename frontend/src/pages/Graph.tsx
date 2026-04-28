@@ -49,6 +49,11 @@ export type Node = {
    * / 'greynoise' / future). Populated by classify_peer in the daemon
    * and only present when at least one source has a hit. */
   reputation?: Record<string, { label: string; queried_at?: number }>;
+  /* >1 when redaction collapsed multiple distinct real peers (different
+   * full IPs in the same /24 with the same port) into this node. The
+   * daemon merges their fields; the UI annotates with "×N" so users
+   * know the dot represents an aggregate. */
+  merged_count?: number;
   /* runtime fields written by force-graph */
   x?: number; y?: number; z?: number;
 };

@@ -65,6 +65,13 @@ export default function PeerSidePanel(
             <span style={{ color: "#556066", marginLeft: 8, fontSize: 10 }}>
               {v6 ? "IPv6" : "IPv4"}
             </span>
+            {(node.merged_count ?? 1) > 1 && (
+              <span title="Distinct real peers in this /24:port redaction bucket"
+                    style={{ marginLeft: 8, color: "#e0a648",
+                             fontSize: 11, fontWeight: 600 }}>
+                ×{node.merged_count}
+              </span>
+            )}
           </div>
           <div style={{ marginTop: 2 }}>
             {flag && <span style={{ marginRight: 6, fontSize: 14 }}>{flag}</span>}
