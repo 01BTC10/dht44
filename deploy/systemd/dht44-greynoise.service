@@ -1,0 +1,15 @@
+[Unit]
+Description=Look up active dht44 peers against the GreyNoise Community API
+Documentation=file:///home/r2d2/dht44-crawler/scripts/query-greynoise.py
+Wants=network-online.target
+After=network-online.target dht44.service
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/usr/bin/python3 /home/r2d2/dht44-crawler/scripts/query-greynoise.py
+TimeoutStartSec=180
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/var/lib/dht44

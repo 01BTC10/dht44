@@ -1,0 +1,12 @@
+[Unit]
+Description=Refresh dht44 reputation lists (iBlockList + Tor exits)
+Documentation=file:///home/r2d2/dht44-crawler/scripts/refresh-reputation.sh
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+# Needs root because it restarts dht44.service after writing the files.
+User=root
+ExecStart=/home/r2d2/dht44-crawler/scripts/refresh-reputation.sh
+TimeoutStartSec=300

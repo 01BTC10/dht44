@@ -1,0 +1,16 @@
+[Unit]
+Description=Hourly GreyNoise reputation lookups for active dht44 peers
+
+[Timer]
+# The Community API free tier caps at 50 lookups per workspace per day;
+# the script keeps a budget of 30 per run. Running once an hour means
+# the budget resets cleanly across the day and a few skipped runs
+# (network blip, missing key) don't starve coverage.
+OnBootSec=15min
+OnUnitActiveSec=1h
+Persistent=true
+RandomizedDelaySec=10min
+Unit=dht44-greynoise.service
+
+[Install]
+WantedBy=timers.target

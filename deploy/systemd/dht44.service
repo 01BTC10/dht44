@@ -1,0 +1,34 @@
+[Unit]
+Description=dht44 — BitTorrent DHT crawler + observer
+Documentation=file:///home/r2d2/dht44-crawler/CLAUDE.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=r2d2
+Group=r2d2
+Environment=DHT44_HOME=/var/lib/dht44
+WorkingDirectory=/home/r2d2/dht44-crawler
+# --no-upnp: VPS deployment doesn't need IGD port mapping (the public
+#   port is already reachable; miniupnpc would just emit warnings).
+# --crawl-workers / --crawl-pps: tuned for a 3-vCPU 4 GB VPS sharing
+#   load with other docker stacks. See deploy/README.md.
+# --web 8877: bound to lo by default (DHT44_WEB_BIND_ALL is not set);
+#   host nginx terminates TLS and reverse-proxies /api + /stream.
+# --geoip-*: MaxMind GeoLite2 dbs at $DHT44_HOME/geoip/. Without these,
+#   country/ASN attribution and the iblocklist datacenter-keyword path
+#   degrade silently.
+ExecStart=/home/r2d2/dht44-crawler/dht44 daemon \
+    --port 6890 \
+    --no-upnp \
+    --crawl --crawl-workers 8 --crawl-pps 100 \
+    --web 8877 \
+    --geoip-city /var/lib/dht44/geoip/city-lite.mmdb \
+    --geoip-asn  /var/lib/dht44/geoip/asn-lite.mmdb
+Restart=on-failure
+RestartSec=10
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

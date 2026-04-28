@@ -1,0 +1,14 @@
+[Unit]
+Description=Refresh dht44 reputation lists daily
+
+[Timer]
+# Run shortly after boot, then daily at 03:30 UTC with up to 30 min jitter
+# so several hosts on the same upstream don't sync-flood.
+OnBootSec=10min
+OnCalendar=*-*-* 03:30:00 UTC
+Persistent=true
+RandomizedDelaySec=30min
+Unit=dht44-reputation.service
+
+[Install]
+WantedBy=timers.target
