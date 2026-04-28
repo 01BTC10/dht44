@@ -460,13 +460,49 @@ classify_peer(json_t *row, json_t *geo)
             json_object_set_new(rep_obj, rs, e);
 
             if (strcmp(rs, "iblocklist") == 0) {
-                score += 3;
-                sig_known_monitor = 1;
-                snprintf(tmp, sizeof(tmp), "iblocklist:%s", rl);
-                json_array_append_new(signals, json_string(tmp));
-                snprintf(tmp, sizeof(tmp),
-                         "on community blocklist (%s)", rl);
-                append_reason(reason, sizeof(reason), &rused, tmp);
+                /* iBlockList sweeps in lots of "suspected monitor"
+                 * networks the curator wasn't sure about — universities,
+                 * generic company names, regional carriers. Score those
+                 * as 0 (informational tag only) and reserve the +3
+                 * monitor weight for category prefixes that actually
+                 * imply BT-context bad behavior. */
+                int strong = 0, mild = 0;
+                /* Strong: explicit anti-P2P, bogons, honeypots, hijacks. */
+                static const char *STRONG[] = {
+                    "AP2P", "Anti-P2P", "Bogon", "Honeypot",
+                    "Hijacked", "Spider", "Brute Force", "Spambot",
+                    NULL
+                };
+                /* Mild: botnets / proxies (often not BT-related but
+                 * still a signal worth surfacing). */
+                static const char *MILD[] = {
+                    "Botnet", "Proxy", NULL
+                };
+                for (int k = 0; STRONG[k]; k++)
+                    if (strncasecmp(rl, STRONG[k], strlen(STRONG[k])) == 0) {
+                        strong = 1; break;
+                    }
+                if (!strong) for (int k = 0; MILD[k]; k++)
+                    if (strncasecmp(rl, MILD[k], strlen(MILD[k])) == 0) {
+                        mild = 1; break;
+                    }
+                if (strong) {
+                    score += 3;
+                    sig_known_monitor = 1;
+                    snprintf(tmp, sizeof(tmp), "iblocklist:%s", rl);
+                    json_array_append_new(signals, json_string(tmp));
+                    snprintf(tmp, sizeof(tmp),
+                             "on community blocklist (%s)", rl);
+                    append_reason(reason, sizeof(reason), &rused, tmp);
+                } else if (mild) {
+                    score += 1;
+                    snprintf(tmp, sizeof(tmp), "iblocklist:%s", rl);
+                    json_array_append_new(signals, json_string(tmp));
+                } else {
+                    /* Tagged for the UI chip; no score impact. */
+                    snprintf(tmp, sizeof(tmp), "iblocklist:%s", rl);
+                    json_array_append_new(signals, json_string(tmp));
+                }
             } else if (strcmp(rs, "tor") == 0) {
                 score += 1;
                 json_array_append_new(signals, json_string("tor_exit"));

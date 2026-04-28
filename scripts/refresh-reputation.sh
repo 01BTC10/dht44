@@ -23,9 +23,14 @@ log() { printf '[refresh-reputation] %s\n' "$*"; }
 
 mkdir -p "$DEST"
 
-# bt_level1 — try the canonical community mirrors in order.
-BT_URL_PRIMARY='https://github.com/Naunter/BT_BlockLists/raw/master/bt_blocklists.gz'
-BT_URL_FALLBACK='https://www.iblocklist.com/list.php?list=bt_level1&fileformat=p2p&archiveformat=gz'
+# bt_level1 — canonical iblocklist.com source (smaller + more focused
+# than community combined-blocklist mirrors, which sweep in spam ranges,
+# universities, hosting providers, etc. and pollute classification).
+# The list ID 'ydxerpxkpcfqjaybcssw' is iblocklist's bt_level1 slug;
+# stable since 2008. The endpoint 302-redirects to a signed CDN URL —
+# curl -L follows it.
+BT_URL_PRIMARY='https://list.iblocklist.com/?list=ydxerpxkpcfqjaybcssw&fileformat=p2p&archiveformat=gz'
+BT_URL_FALLBACK='https://github.com/Naunter/BT_BlockLists/raw/master/bt_blocklists.gz'
 
 log "fetching bt_level1.p2p"
 if curl -sSL --max-time 60 -o "$TMP/bt.gz" "$BT_URL_PRIMARY"; then
