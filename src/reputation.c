@@ -3,31 +3,80 @@
 
 #include <arpa/inet.h>
 #include <ctype.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #define TAG "[dht44:reputation] "
 
-/* ---------- interned string pool (labels + sources) ---------- */
-/* Both lookup paths return `const char *` borrows into this pool. We
- * never need to free individual entries; reputation_clear() drops the
- * pool wholesale. Linear scan for dedup is fine — for iBlockList we
- * see ~100 unique labels, for Tor we see exactly 1. */
+/* ---------- interned string pool (labels + sources) ----------
+ *
+ * Open-addressed hash table keyed on FNV-1a. Both lookup paths return
+ * a `const char *` borrow into the pool. reputation_clear() frees the
+ * pool wholesale.
+ *
+ * The pool needs to handle 100K+ unique labels (iBlockList "combined"
+ * mirrors carry per-organisation descriptions). A naive linear scan
+ * is O(n²) in load time and made the daemon spin for minutes on
+ * startup before the table size hit a steady state. */
 struct strpool {
+    /* Entries: `count` valid pointers, kept dense. */
     char  **items;
     int     count;
     int     cap;
+    /* Hash index: open addressing, indices into `items`. -1 = empty.
+     * Sized as 2 * count (next power of 2) so load factor < 0.5. */
+    int    *hash;
+    int     hash_cap;       /* always a power of 2 */
+    int     hash_mask;
 };
+
+static uint32_t
+fnv1a(const char *s)
+{
+    uint32_t h = 2166136261u;
+    while (*s) {
+        h ^= (uint8_t)*s++;
+        h *= 16777619u;
+    }
+    return h;
+}
+
+static int
+strpool_grow_hash(struct strpool *p, int new_cap)
+{
+    int *n = malloc((size_t)new_cap * sizeof(*n));
+    if (!n) return -1;
+    for (int i = 0; i < new_cap; i++) n[i] = -1;
+    for (int i = 0; i < p->count; i++) {
+        uint32_t h = fnv1a(p->items[i]);
+        int slot = h & (uint32_t)(new_cap - 1);
+        while (n[slot] != -1) slot = (slot + 1) & (new_cap - 1);
+        n[slot] = i;
+    }
+    free(p->hash);
+    p->hash     = n;
+    p->hash_cap = new_cap;
+    p->hash_mask = new_cap - 1;
+    return 0;
+}
 
 static const char *
 strpool_intern(struct strpool *p, const char *s)
 {
-    for (int i = 0; i < p->count; i++) {
-        if (strcmp(p->items[i], s) == 0) return p->items[i];
+    if (p->hash_cap == 0) {
+        if (strpool_grow_hash(p, 256) < 0) return NULL;
     }
+    uint32_t h    = fnv1a(s);
+    int      slot = h & (uint32_t)p->hash_mask;
+    while (p->hash[slot] != -1) {
+        if (strcmp(p->items[p->hash[slot]], s) == 0) return p->items[p->hash[slot]];
+        slot = (slot + 1) & p->hash_mask;
+    }
+
     if (p->count == p->cap) {
-        int new_cap = p->cap ? p->cap * 2 : 16;
+        int new_cap = p->cap ? p->cap * 2 : 256;
         char **n = realloc(p->items, (size_t)new_cap * sizeof(*n));
         if (!n) return NULL;
         p->items = n;
@@ -35,7 +84,17 @@ strpool_intern(struct strpool *p, const char *s)
     }
     char *copy = strdup(s);
     if (!copy) return NULL;
-    p->items[p->count++] = copy;
+    int idx = p->count++;
+    p->items[idx] = copy;
+    p->hash[slot] = idx;
+
+    /* Rehash if load factor exceeds 0.5. */
+    if (p->count * 2 >= p->hash_cap) {
+        if (strpool_grow_hash(p, p->hash_cap * 2) < 0) {
+            /* lookup table is now stale but items[] is intact;
+             * subsequent inserts will degrade but not corrupt. */
+        }
+    }
     return copy;
 }
 
@@ -44,8 +103,10 @@ strpool_clear(struct strpool *p)
 {
     for (int i = 0; i < p->count; i++) free(p->items[i]);
     free(p->items);
+    free(p->hash);
     p->items = NULL;
-    p->count = p->cap = 0;
+    p->hash  = NULL;
+    p->count = p->cap = p->hash_cap = p->hash_mask = 0;
 }
 
 /* ---------- range arrays ---------- */
