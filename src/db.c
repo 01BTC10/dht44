@@ -1196,6 +1196,33 @@ db_select_graph_json(int limit)
         kept++;
     }
 
+    /* --- Re-count internal_deg over the kept set only ----------------
+     * The earlier pass counted edges where both endpoints were in the
+     * 3x-larger candidate set; that ranking is what drives the keep
+     * cut. But the JSON we emit only carries edges between kept nodes,
+     * so the `deg` field needs to match. Without this re-count a peer
+     * could advertise deg=11 while rendering with 0 edges (all 11
+     * candidate-set neighbors were below the keep threshold), which
+     * makes the SPA's orphan-removal pass fail to drop it. */
+    for (int i = 0; i < cand_n; i++) cands[i].internal_deg = 0;
+    if (sqlite3_prepare_v2(g_db,
+            "SELECT src_ip,src_port,dst_ip,dst_port FROM edges",
+            -1, &e, NULL) == SQLITE_OK) {
+        while (sqlite3_step(e) == SQLITE_ROW) {
+            const char *sip = (const char *)sqlite3_column_text(e, 0);
+            int sport = sqlite3_column_int(e, 1);
+            const char *dip = (const char *)sqlite3_column_text(e, 2);
+            int dport = sqlite3_column_int(e, 3);
+            int si = cand_index_lookup(&ix, sip, sport);
+            int di = cand_index_lookup(&ix, dip, dport);
+            if (si >= 0 && di >= 0 && cands[si].keep && cands[di].keep) {
+                cands[si].internal_deg++;
+                cands[di].internal_deg++;
+            }
+        }
+        sqlite3_finalize(e);
+    }
+
     /* --- Emit JSON for kept nodes -------------------------------- */
     json_t *nodes = json_array();
     for (int i = 0; i < cand_n; i++) {
