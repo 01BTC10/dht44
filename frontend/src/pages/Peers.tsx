@@ -20,9 +20,40 @@ type Row = {
   crawler_score?: number;
   crawler_signals?: string[];
   crawler_reason?: string;
+  reputation?: Record<string, { label: string; queried_at?: number }>;
   supports_bep51?: number | null;
   geo?: Geo;
 };
+
+/* Compact reputation chip used inline next to ip:port. Color-coded by
+ * source/label so the eye reads malicious-vs-benign at a glance. */
+function RepChip({ src, label }: { src: string; label: string }) {
+  const isMalicious = src === "iblocklist"
+    || (src === "greynoise" && label.startsWith("malicious"));
+  const isBenign    = src === "greynoise" && label.startsWith("benign");
+  const isTor       = src === "tor";
+  const bg = isMalicious ? "#3a1a22"
+           : isBenign    ? "#1a2f1a"
+           : isTor       ? "#2a1a3a"
+           : "#1d2530";
+  const fg = isMalicious ? "#ff9bb5"
+           : isBenign    ? "#9be0a8"
+           : isTor       ? "#c8a8e8"
+           : "#a0a8b0";
+  const border = isMalicious ? "#562a36"
+               : isBenign    ? "#264a26"
+               : isTor       ? "#412a5a"
+               : "#2a3642";
+  return (
+    <span title={`${src}: ${label}`}
+          style={{ background: bg, color: fg,
+                   border: `1px solid ${border}`, borderRadius: 3,
+                   padding: "0 5px", marginLeft: 6, fontSize: 10,
+                   lineHeight: "14px", verticalAlign: "middle" }}>
+      {src === "iblocklist" ? label : src === "tor" ? "tor" : `gn:${label}`}
+    </span>
+  );
+}
 
 type SourceBucket = { source: string; count: number };
 
@@ -384,6 +415,10 @@ export default function Peers() {
                                   signals={r.crawler_signals ?? []}
                                   reason={r.crawler_reason ?? ""} />
                   )}
+                  {r.reputation && Object.entries(r.reputation).map(
+                    ([src, e]) => (
+                      <RepChip key={src} src={src} label={e?.label ?? "?"} />
+                    ))}
                 </td>
                 <td className="geo" title={name || undefined}>
                   {flag && <span style={{ marginRight: 6, fontSize: 15 }}>{flag}</span>}

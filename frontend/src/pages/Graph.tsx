@@ -45,6 +45,10 @@ export type Node = {
   crawler_score?: number;
   crawler_signals?: string[];
   crawler_reason?: string;
+  /* External reputation lookup, keyed by source ('iblocklist' / 'tor'
+   * / 'greynoise' / future). Populated by classify_peer in the daemon
+   * and only present when at least one source has a hit. */
+  reputation?: Record<string, { label: string; queried_at?: number }>;
   /* runtime fields written by force-graph */
   x?: number; y?: number; z?: number;
 };

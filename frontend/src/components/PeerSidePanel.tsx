@@ -99,6 +99,54 @@ export default function PeerSidePanel(
         </div>
       )}
 
+      {node.reputation && Object.keys(node.reputation).length > 0 && (
+        <div style={{ margin: "8px 0" }}>
+          <div style={{ color: "#8fc0ff", fontSize: 10, letterSpacing: 0.5,
+                        textTransform: "uppercase", marginBottom: 4 }}>
+            external reputation
+          </div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+            {Object.entries(node.reputation).map(([src, e]) => {
+              const label = e?.label ?? "?";
+              /* Color-code by source / label so the eye reads
+               * malicious-vs-benign at a glance. */
+              const isMalicious = src === "iblocklist"
+                || (src === "greynoise" && label.startsWith("malicious"));
+              const isBenign    = src === "greynoise" && label.startsWith("benign");
+              const isTor       = src === "tor";
+              const bg = isMalicious ? "#3a1a22"
+                       : isBenign    ? "#1a2f1a"
+                       : isTor       ? "#2a1a3a"
+                       : "#1d2530";
+              const fg = isMalicious ? "#ff9bb5"
+                       : isBenign    ? "#9be0a8"
+                       : isTor       ? "#c8a8e8"
+                       : "#a0a8b0";
+              const border = isMalicious ? "#562a36"
+                           : isBenign    ? "#264a26"
+                           : isTor       ? "#412a5a"
+                           : "#2a3642";
+              return (
+                <span key={src}
+                      style={{
+                        background: bg, color: fg,
+                        border: `1px solid ${border}`,
+                        borderRadius: 3, padding: "2px 7px",
+                        fontSize: 11, lineHeight: "16px",
+                      }}>
+                  <span style={{ color: "#8892a0", marginRight: 5,
+                                 fontSize: 10, textTransform: "uppercase",
+                                 letterSpacing: 0.4 }}>
+                    {src}
+                  </span>
+                  {label}
+                </span>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
       <div style={{ marginTop: 8, marginBottom: 4, color: "#8fc0ff",
                     fontSize: 10, letterSpacing: 0.5,
                     textTransform: "uppercase" }}>
