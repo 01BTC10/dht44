@@ -312,6 +312,39 @@ top_k_done(const struct worker *w)
     return 1;
 }
 
+/* One log line per completed walk so the operator can see how many hops
+ * walks actually use, how saturated top-K becomes, and which termination
+ * path fires most often. Used to validate (or revise) the
+ * SHORTLIST=64 / TOP_K=20 / max_hops=48 constants once a few hours of
+ * data are in the journal. Call sites: every place worker_reseed() is
+ * about to wipe walk state. Skip silently if the walk never made it
+ * past the seed phase (sl_count==0 && hops==0). */
+static void
+log_walk_completion(const struct worker *w, const char *terminated_by)
+{
+    if (w->sl_count == 0 && w->hops == 0) return;
+
+    int responded = 0, failed = 0, fresh = 0, inflight = 0;
+    int n = w->sl_count < CRAWL_TOP_K ? w->sl_count : CRAWL_TOP_K;
+    for (int i = 0; i < n; i++) {
+        switch (w->sl[i].state) {
+            case CAND_RESPONDED: responded++; break;
+            case CAND_FAILED:    failed++;    break;
+            case CAND_FRESH:     fresh++;     break;
+            case CAND_INFLIGHT:  inflight++;  break;
+        }
+    }
+    /* First 4 bytes of the random target are enough to disambiguate
+     * walks in the log without printing the full 20-byte node id. */
+    fprintf(stderr,
+            TAG "walk done v%d t=%02x%02x%02x%02x.. "
+            "hops=%d/%d sl=%d top%d[r=%d f=%d fresh=%d if=%d] by=%s\n",
+            w->family == AF_INET6 ? 6 : 4,
+            w->target[0], w->target[1], w->target[2], w->target[3],
+            w->hops, w->max_hops, w->sl_count, CRAWL_TOP_K,
+            responded, failed, fresh, inflight, terminated_by);
+}
+
 static void
 rand_target(uint8_t t[BEP44_NODE_ID_LEN])
 {
@@ -530,8 +563,13 @@ worker_send_probe(struct worker *w)
 {
     if (w->in_flight) return;
 
-    /* Termination: top-K all terminated → walk done, start a new target. */
-    if (top_k_done(w) || w->hops >= w->max_hops) {
+    /* Termination: top-K all terminated → walk done, start a new target.
+     * Capture which condition fired BEFORE reseed wipes the state, so
+     * the completion log line attributes the termination correctly. */
+    int by_topk    = top_k_done(w);
+    int by_maxhops = w->hops >= w->max_hops;
+    if (by_topk || by_maxhops) {
+        log_walk_completion(w, by_topk ? "topk" : "maxhops");
         worker_reseed(w);
         if (w->sl_count == 0) return;      /* routing table still warming up */
     }
@@ -540,6 +578,7 @@ worker_send_probe(struct worker *w)
     if (idx < 0) {
         /* No fresh candidates but top-K not all done (e.g. most failed).
          * Treat as walk-complete and move on. */
+        log_walk_completion(w, "exhausted");
         worker_reseed(w);
         return;
     }
