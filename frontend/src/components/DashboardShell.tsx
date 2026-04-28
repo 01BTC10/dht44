@@ -5,11 +5,12 @@
  * Marked noindex via SEO — the data is real-time and not citable.
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { NavLink, Outlet, Link } from "react-router-dom";
 import SEO from "./SEO";
 import { stream } from "../ws";
 
+type DenyBreakdown = { reputation: number; rate_limit: number; classifier: number };
 type Stats = {
   peers: number;
   peers_v4?: number;
@@ -24,6 +25,9 @@ type Stats = {
   /* Unix seconds of the earliest peer observation in this db.
    * Used to render "uptime since first observation". 0 if empty. */
   db_first_seen?: number;
+  deny_set_size?: number;
+  denied_pkts?: DenyBreakdown;
+  deny_breakdown?: DenyBreakdown;
 };
 
 /* "since X" duration in compact form: "3d 4h", "5h 12m", "47m", "8s".
@@ -49,9 +53,22 @@ const TABS: { to: string; label: string }[] = [
   { to: "/dashboard/graph",      label: "graph" },
 ];
 
+/* Sum the three denied_pkts buckets into a single cumulative count. */
+function deniedTotal(d: DenyBreakdown | undefined): number {
+  if (!d) return 0;
+  return (d.reputation ?? 0) + (d.rate_limit ?? 0) + (d.classifier ?? 0);
+}
+
 export default function DashboardShell() {
   const [up, setUp]       = useState(false);
   const [stats, setStats] = useState<Stats | null>(null);
+  /* Rolling window of recent samples for computing drops/min. We keep
+   * the oldest sample within the 60-second window plus the latest;
+   * the rate is (latest.total - oldest.total) / elapsed_minutes.
+   * After a daemon restart the cumulative counter resets to 0, which
+   * we detect (latest < oldest) and reseed the window. */
+  const sampleHistory = useRef<{ ts: number; denied: number }[]>([]);
+  const [dropsPerMin, setDropsPerMin] = useState<number | null>(null);
 
   useEffect(() => {
     stream.onStatus = setUp;
@@ -64,6 +81,24 @@ export default function DashboardShell() {
       if (topic === "stats") setStats(data as Stats);
     });
   }, []);
+
+  /* Recompute drops/min whenever a new stats sample arrives. */
+  useEffect(() => {
+    if (!stats || !stats.denied_pkts) return;
+    const now    = Date.now();
+    const denied = deniedTotal(stats.denied_pkts);
+    const hist   = sampleHistory.current;
+    /* Detect counter reset (daemon restart): drops counter went down. */
+    if (hist.length && denied < hist[hist.length - 1].denied) hist.length = 0;
+    hist.push({ ts: now, denied });
+    /* Trim anything older than 5 min. */
+    while (hist.length > 1 && now - hist[0].ts > 5 * 60 * 1000) hist.shift();
+    /* Need at least 5s of history for a non-jittery rate. */
+    if (hist.length >= 2 && now - hist[0].ts >= 5000) {
+      const elapsedMin = (now - hist[0].ts) / 60000;
+      setDropsPerMin((denied - hist[0].denied) / elapsedMin);
+    }
+  }, [stats]);
 
   return (
     <div className="app">
@@ -128,6 +163,30 @@ export default function DashboardShell() {
           <div><b>infohashes</b>{stats.infohashes.toLocaleString()}</div>
           <div><b>bep44</b>{stats.bep44_items.toLocaleString()}</div>
           <div><b>rate</b>{stats.queries_per_min}/min</div>
+          {stats.deny_set_size != null && (
+            <div title={
+              "log-and-drop deny pipeline. set: "
+              + (stats.deny_breakdown
+                  ? `rep:${stats.deny_breakdown.reputation} `
+                    + `rate:${stats.deny_breakdown.rate_limit} `
+                    + `cls:${stats.deny_breakdown.classifier}`
+                  : "?")
+              + ". cumulative drops since boot: "
+              + (stats.denied_pkts
+                  ? `rep:${stats.denied_pkts.reputation} `
+                    + `rate:${stats.denied_pkts.rate_limit} `
+                    + `cls:${stats.denied_pkts.classifier}`
+                  : "?")
+            }
+                 style={{ color: "#ff9bb5" }}>
+              <b>denied</b>{stats.deny_set_size.toLocaleString()}
+              {dropsPerMin != null && (
+                <span className="small" style={{ marginLeft: 6 }}>
+                  ({Math.round(dropsPerMin).toLocaleString()}/min)
+                </span>
+              )}
+            </div>
+          )}
           {stats.db_first_seen != null && stats.db_first_seen > 0 && (
             <div
               title={`since ${new Date(stats.db_first_seen * 1000).toLocaleString()}`}
