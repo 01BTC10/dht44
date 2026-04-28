@@ -464,26 +464,48 @@ classify_peer(json_t *row, json_t *geo)
                  * networks the curator wasn't sure about — universities,
                  * generic company names, regional carriers. Score those
                  * as 0 (informational tag only) and reserve the +3
-                 * monitor weight for category prefixes that actually
-                 * imply BT-context bad behavior. */
+                 * monitor weight for either:
+                 *   (a) category prefixes that imply BT-context bad
+                 *       behavior (AP2P, Bogon, Honeypot, ...), or
+                 *   (b) known anti-P2P operator names appearing in the
+                 *       label (MarkMonitor, Trident Media Guard, IP
+                 *       Echelon, Irdeto, ...) — same list we apply to
+                 *       ASN-org matching above so both paths agree. */
                 int strong = 0, mild = 0;
-                /* Strong: explicit anti-P2P, bogons, honeypots, hijacks. */
-                static const char *STRONG[] = {
+                static const char *STRONG_PREFIX[] = {
                     "AP2P", "Anti-P2P", "Bogon", "Honeypot",
                     "Hijacked", "Spider", "Brute Force", "Spambot",
                     NULL
                 };
-                /* Mild: botnets / proxies (often not BT-related but
-                 * still a signal worth surfacing). */
-                static const char *MILD[] = {
+                static const char *MILD_PREFIX[] = {
                     "Botnet", "Proxy", NULL
                 };
-                for (int k = 0; STRONG[k]; k++)
-                    if (strncasecmp(rl, STRONG[k], strlen(STRONG[k])) == 0) {
+                /* Anti-P2P operator names — superset of
+                 * MONITOR_ASN_KEYWORDS plus a couple of operators that
+                 * tend to show up in iBlockList descriptions but not as
+                 * registered ASN orgs. */
+                static const char *OPERATOR_NEEDLES[] = {
+                    "markmonitor", "ip-echelon", "ip echelon", "irdeto",
+                    "nagra", "friend mts", "opsec", "ceg tek",
+                    "rightscorp", "excipio",
+                    "trident media guard", "tmg",
+                    "bayshore", "media protector", "antipiracy",
+                    "anti-piracy", "swarm", "honeyswarm",
+                    NULL
+                };
+                for (int k = 0; STRONG_PREFIX[k]; k++)
+                    if (strncasecmp(rl, STRONG_PREFIX[k],
+                                    strlen(STRONG_PREFIX[k])) == 0) {
                         strong = 1; break;
                     }
-                if (!strong) for (int k = 0; MILD[k]; k++)
-                    if (strncasecmp(rl, MILD[k], strlen(MILD[k])) == 0) {
+                if (!strong)
+                    for (int k = 0; OPERATOR_NEEDLES[k]; k++)
+                        if (contains_ci(rl, OPERATOR_NEEDLES[k])) {
+                            strong = 1; break;
+                        }
+                if (!strong) for (int k = 0; MILD_PREFIX[k]; k++)
+                    if (strncasecmp(rl, MILD_PREFIX[k],
+                                    strlen(MILD_PREFIX[k])) == 0) {
                         mild = 1; break;
                     }
                 if (strong) {
