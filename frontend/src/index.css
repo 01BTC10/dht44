@@ -81,7 +81,23 @@ td.newrow { animation: flash 1.8s ease-out; }
   text-transform: uppercase;
 }
 .panel h3 .small { margin-left: 8px; text-transform: none; letter-spacing: 0; }
-.bars { list-style: none; padding: 0; margin: 0; }
+.bars {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  /* Cap each panel's bar list so a long tail (50+ countries / clients)
+   * doesn't stretch the page. ~220px holds ~12 rows visible; the rest
+   * scrolls inside the panel. */
+  max-height: 220px;
+  overflow-y: auto;
+  /* Subtle scrollbar so it doesn't dominate the panel chrome. */
+  scrollbar-width: thin;
+  scrollbar-color: #2a3642 #14181d;
+}
+.bars::-webkit-scrollbar           { width: 6px; }
+.bars::-webkit-scrollbar-track     { background: #14181d; }
+.bars::-webkit-scrollbar-thumb     { background: #2a3642; border-radius: 3px; }
+.bars::-webkit-scrollbar-thumb:hover { background: #3a4652; }
 .bars li {
   display: grid;
   grid-template-columns: 1fr 60px;
