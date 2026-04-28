@@ -18,8 +18,8 @@
 #define TAG "[dht44:crawl] "
 
 #define CRAWL_MAX_WORKERS   32
-#define CRAWL_SHORTLIST     24          /* candidate cap per walk */
-#define CRAWL_TOP_K          8          /* termination: top-K all terminated */
+#define CRAWL_SHORTLIST     64          /* candidate cap per walk */
+#define CRAWL_TOP_K         20          /* termination: top-K all terminated */
 #define CRAWL_TX_TIMEOUT_MS 3000
 
 enum {
@@ -605,7 +605,7 @@ crawl_start(int workers, int max_pkts_per_sec)
     int v6_enabled = dht_wrap_socket6() >= 0;
     for (int i = 0; i < g_worker_n; i++) {
         g_workers[i].in_use = 1;
-        g_workers[i].max_hops = 16;
+        g_workers[i].max_hops = 48;
         g_workers[i].inflight_idx = -1;
         g_workers[i].family = (v6_enabled && g_worker_n > 1 && (i % 4) == 3)
                               ? AF_INET6 : AF_INET;
