@@ -312,22 +312,13 @@ export default function Graph() {
     }
   };
 
-  /* Edge fade by camera zoom: at large node counts, only show the link if
-   * either endpoint is near the camera. Cheap; runs per frame per link. */
-  const linkVisibility = (l: any): boolean => {
-    if (displayed.nodes.length <= 1500) return true;
-    const cam: any = (fgRef.current as any)?.camera?.();
-    if (!cam) return true;
-    const a = l.source, b = l.target;
-    if (!a || a.x == null) return true;
-    const da = Math.hypot(a.x - cam.position.x, a.y - cam.position.y, a.z - cam.position.z);
-    if (da < 700) return true;
-    if (b && b.x != null) {
-      const db = Math.hypot(b.x - cam.position.x, b.y - cam.position.y, b.z - cam.position.z);
-      if (db < 700) return true;
-    }
-    return false;
-  };
+  /* Previously: linkVisibility() culled edges whose endpoints were >700
+   * units from the camera at >1500 nodes — a perf optimization with a
+   * very confusing side effect. Zooming out hid every edge until the
+   * camera came back close to a specific node, and from a user's POV
+   * the edges "disappeared and never came back". With the 25k option
+   * removed and a 10k effective ceiling, edge rendering is cheap
+   * enough to skip the culling entirely. */
 
   const Chip = ({ active, onClick, children, color }:
     { active: boolean; onClick: () => void; children: React.ReactNode; color?: string }) => (
@@ -439,7 +430,6 @@ export default function Graph() {
           linkColor={() => "rgba(160,195,235,0.6)"}
           linkOpacity={0.55}
           linkWidth={1.2}
-          linkVisibility={linkVisibility as any}
           enableNodeDrag={false}    /* dragging triggers extra simulation */
           showNavInfo={false}
           warmupTicks={50}
