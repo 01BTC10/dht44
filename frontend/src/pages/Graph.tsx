@@ -179,14 +179,27 @@ export default function Graph() {
     };
     const wantBep51 = (n: Node) => !bep51Only || n.supports_bep51 === 1;
 
-    const nodes = data.nodes.filter(n =>
+    const nodes0 = data.nodes.filter(n =>
       wantClass(n) && wantAlive(n) && wantFamily(n) && wantBep51(n));
-    const ids = new Set(nodes.map(n => n.id));
+    const ids = new Set(nodes0.map(n => n.id));
     const links = data.links.filter(l => {
       const s = typeof l.source === "string" ? l.source : (l.source as any).id;
       const t = typeof l.target === "string" ? l.target : (l.target as any).id;
       return ids.has(s) && ids.has(t);
     });
+    /* Second pass: drop any node that no longer has at least one
+     * link in the filtered subgraph. Without this, flipping a class
+     * chip can leave nodes floating with zero visible edges (their
+     * neighbors got filtered out), which then creates click-routing
+     * confusion in 3D — the lonely sphere is often visually inside
+     * a nearby hub and the click resolves to the hub instead. */
+    const connected = new Set<string>();
+    for (const l of links) {
+      const s = typeof l.source === "string" ? l.source : (l.source as any).id;
+      const t = typeof l.target === "string" ? l.target : (l.target as any).id;
+      connected.add(s); connected.add(t);
+    }
+    const nodes = nodes0.filter(n => connected.has(n.id));
     return { nodes, links };
   }, [data, aliveFilter, familyFilter, classFilter, bep51Only]);
 
@@ -439,7 +452,15 @@ export default function Graph() {
           backgroundColor="#0a0c0f"
           graphData={displayed}
           nodeId="id"
-          nodeVal={(n: any) => Math.max(1, Math.sqrt(n.deg || 1) * 1.4)}
+          /* Minimum sphere radius is 2.5 (vs. ~1.4 from sqrt(1)*1.4). With
+           * the unfloored formula a degree-1 node is small enough that an
+           * adjacent degree-200 hub's radius (~19.8) can swallow it on
+           * camera angle, sending the 3D ray-pick click to the hub. The
+           * floor preserves "size ~ degree" for everything from degree 4
+           * up; degrees 1–3 collapse to the same minimum, which is the
+           * right compromise — they're indistinguishable on screen at
+           * those sizes anyway, and the click target stays clickable. */
+          nodeVal={(n: any) => Math.max(2.5, Math.sqrt(n.deg || 1) * 1.4)}
           nodeColor={(n: any) => {
             if (n.id === selected?.id) return "#ffffff";
             if (hilite.has(n.id))      return "#ffeb3b";
