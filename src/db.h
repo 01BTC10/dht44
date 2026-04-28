@@ -109,6 +109,27 @@ int64_t db_count_bep44(void);
  * stats endpoint to populate "alive in last N hours" buckets. */
 int64_t db_count_peers_since(int64_t since_ts);
 
+/* peer_reputation cache: out-of-process scripts (e.g. the GreyNoise helper)
+ * write rows here; the http layer reads at classify time.
+ *   ip          TEXT  — same v4/v6 dotted form used in `peers`
+ *   source      TEXT  — 'greynoise' / 'iblocklist' / 'tor' / future
+ *   label       TEXT  — human-readable, e.g. 'benign:censys', 'malicious'
+ *   queried_at  INTEGER unix ts — read paths can age out via `WHERE queried_at > ?`
+ * PRIMARY KEY(ip, source) so multiple sources per IP coexist.
+ *
+ * Local lists (iblocklist, tor) load via reputation.c at boot from flat
+ * files — those are NOT mirrored into this table. Only the API-driven
+ * GreyNoise side touches it. */
+char *db_select_reputation_json(const char *ip);
+void  db_upsert_reputation(const char *ip, const char *source,
+                           const char *label, int64_t queried_at);
+/* Pull up to `max` peers (with last_seen >= since) that DON'T yet have
+ * a row in peer_reputation for the given source. Used by the GreyNoise
+ * helper to pick what to look up next. Output: ip column only. */
+int   db_select_peers_missing_reputation(const char *source, int max,
+                                         int64_t since,
+                                         char (*out_ips)[64]);
+
 /* Closest-N alive peers of `family` (AF_INET or AF_INET6) by XOR distance to
  * `target`. Considers only rows with a known node_id and last_seen >=
  * fresh_threshold. Returns the count actually filled (<= n_max). Used by the

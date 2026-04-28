@@ -41,6 +41,7 @@
 #include "lookup.h"
 #include "observe.h"
 #include "redact.h"
+#include "reputation.h"
 #include "state.h"
 #include "upnp.h"
 
@@ -78,6 +79,9 @@ typedef struct {
     const char *geoip_city;         /* NULL = none */
     const char *geoip_asn;          /* NULL = none */
     int      web_show_full_ips;     /* 0 = redact (default), 1 = show full */
+
+    /* Reputation lists (loaded by reputation.c at boot). */
+    const char *reputation_dir;     /* NULL = $DHT44_HOME/reputation/ */
 } daemon_args;
 
 static const char USAGE_DAEMON[] =
@@ -90,7 +94,8 @@ static const char USAGE_DAEMON[] =
     "                    [--prune-days D]\n"
     "                    [--web PORT] [--web-static DIR]\n"
     "                    [--geoip-city PATH] [--geoip-asn PATH]\n"
-    "                    [--web-show-full-ips]   (default: redact to /24, /48)\n";
+    "                    [--web-show-full-ips]   (default: redact to /24, /48)\n"
+    "                    [--reputation-dir PATH] (default: $DHT44_HOME/reputation)\n";
 
 static int
 parse_args(int argc, char **argv, daemon_args *a)
@@ -150,6 +155,8 @@ parse_args(int argc, char **argv, daemon_args *a)
             a->geoip_asn = argv[++i];
         } else if (strcmp(argv[i], "--web-show-full-ips") == 0) {
             a->web_show_full_ips = 1;
+        } else if (strcmp(argv[i], "--reputation-dir") == 0 && i + 1 < argc) {
+            a->reputation_dir = argv[++i];
         } else {
             fputs(USAGE_DAEMON, stderr);
             return -1;
@@ -1354,6 +1361,19 @@ cmd_daemon(int argc, char **argv)
             http_ws_set_geoip(city, asn);
         }
         observe_set_event_sink(ws_bridge, NULL);
+
+        /* Reputation lists. Default $DHT44_HOME/reputation/. Loader is
+         * silent if the dir or files are missing. */
+        const char *rep_dir = g_args.reputation_dir;
+        char        auto_rep[768];
+        if (!rep_dir) {
+            char home[512];
+            if (state_home(home, sizeof(home)) == 0) {
+                snprintf(auto_rep, sizeof(auto_rep), "%s/reputation", home);
+                rep_dir = auto_rep;
+            }
+        }
+        if (rep_dir) reputation_load_dir(rep_dir);
     }
     if (g_args.crawl) {
         crawl_start(g_args.crawl_workers, g_args.crawl_pps);

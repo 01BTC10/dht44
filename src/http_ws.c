@@ -16,6 +16,7 @@
 
 #include "db.h"
 #include "dht_wrap.h"
+#include "reputation.h"
 
 #define TAG "[dht44:web] "
 
@@ -429,14 +430,106 @@ classify_peer(json_t *row, json_t *geo)
         append_reason(reason, sizeof(reason), &rused, tmp);
     }
 
+    /* External reputation: local lists (iblocklist, tor) via reputation.c
+     * and the GreyNoise cache populated by the out-of-process helper.
+     * Both are emitted as a `reputation` object on the row so the UI
+     * can show full detail without re-querying. Scoring:
+     *   iblocklist hit  : +3 (community-curated anti-P2P operator list)
+     *   tor exit        : +1 (informational — rarely seen in DHT)
+     *   greynoise:malicious : +3
+     *   greynoise:benign    : 0 (informational; the seedbox-like clause
+     *                            already prevents mislabeling research
+     *                            scanners as honeypots if their other
+     *                            signals are clean)
+     *   anything else        : 0 */
+    json_t      *rep_obj           = NULL;
+    int          sig_known_monitor = 0;     /* iblocklist or greynoise:malicious */
+    int          sig_known_benign  = 0;     /* greynoise:benign (Censys, Shodan, ...) */
+
+    const char *ip_str = json_string_value(json_object_get(row, "ip"));
+    if (ip_str && *ip_str) {
+        struct sockaddr_storage ss;
+        socklen_t               ss_len = 0;
+        const char             *rs = NULL, *rl = NULL;
+        if (parse_ip_lenient(ip_str, &ss, &ss_len)
+            && reputation_lookup((struct sockaddr *)&ss, &rs, &rl)
+            && rs && rl) {
+            if (!rep_obj) rep_obj = json_object();
+            json_t *e = json_object();
+            json_object_set_new(e, "label", json_string(rl));
+            json_object_set_new(rep_obj, rs, e);
+
+            if (strcmp(rs, "iblocklist") == 0) {
+                score += 3;
+                sig_known_monitor = 1;
+                snprintf(tmp, sizeof(tmp), "iblocklist:%s", rl);
+                json_array_append_new(signals, json_string(tmp));
+                snprintf(tmp, sizeof(tmp),
+                         "on community blocklist (%s)", rl);
+                append_reason(reason, sizeof(reason), &rused, tmp);
+            } else if (strcmp(rs, "tor") == 0) {
+                score += 1;
+                json_array_append_new(signals, json_string("tor_exit"));
+                append_reason(reason, sizeof(reason), &rused,
+                              "Tor exit node");
+            }
+        }
+
+        char *gn_json = db_select_reputation_json(ip_str);
+        if (gn_json) {
+            json_error_t je;
+            json_t *gn = json_loads(gn_json, 0, &je);
+            free(gn_json);
+            if (gn && json_is_object(gn)) {
+                /* Merge any DB-sourced rows that we haven't already
+                 * emitted from the local-list path. */
+                const char *src;
+                json_t     *entry;
+                json_object_foreach(gn, src, entry) {
+                    if (!rep_obj) rep_obj = json_object();
+                    if (!json_object_get(rep_obj, src)) {
+                        json_object_set(rep_obj, src, entry);
+                    }
+                    if (strcmp(src, "greynoise") == 0) {
+                        const char *lbl = json_string_value(
+                                              json_object_get(entry, "label"));
+                        if (lbl && strncmp(lbl, "malicious", 9) == 0) {
+                            score += 3;
+                            sig_known_monitor = 1;
+                            snprintf(tmp, sizeof(tmp), "greynoise:%s", lbl);
+                            json_array_append_new(signals, json_string(tmp));
+                            append_reason(reason, sizeof(reason), &rused,
+                                          "GreyNoise: classified malicious");
+                        } else if (lbl && strncmp(lbl, "benign", 6) == 0) {
+                            sig_known_benign = 1;
+                            snprintf(tmp, sizeof(tmp), "greynoise:%s", lbl);
+                            json_array_append_new(signals, json_string(tmp));
+                            append_reason(reason, sizeof(reason), &rused,
+                                          "GreyNoise: known benign scanner");
+                        }
+                    }
+                }
+                json_decref(gn);
+            } else if (gn) json_decref(gn);
+        }
+    }
+
+    if (rep_obj) json_object_set_new(row, "reputation", rep_obj);
+
     /* "seedbox" pattern: peer is on a known datacenter / hosting ASN, has
      * a real client identifier, and shows none of the crawler-shaped
      * signals (not silent, not asymmetric inbound, doesn't advertise
      * read-only, has v_string, isn't on an anti-piracy ASN). When this
      * is true AND the peer would otherwise be tagged crawler/monitor by
      * raw score, label it "seedbox" instead — informative, not a
-     * suspicion. Peers with no signals at all stay "ok" (no badge). */
+     * suspicion. Peers with no signals at all stay "ok" (no badge).
+     *
+     * If GreyNoise has labeled the peer "benign" (Censys, Shodan, etc.)
+     * we DO NOT downgrade to seedbox — we keep the raw class but the UI
+     * picks up the greynoise:benign signal and color-codes it. */
     int is_seedbox_like = is_dc && !mon
+                        && !sig_known_monitor
+                        && !sig_known_benign
                         && v_str && !json_is_null(v_str)
                         && !sig_silent_taker
                         && !sig_asym_in

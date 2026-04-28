@@ -168,6 +168,12 @@ db_open(const char *path)
         "ALTER TABLE peers ADD COLUMN supports_bep51 INTEGER",
         "ALTER TABLE peers ADD COLUMN last_pinged   INTEGER",
         "CREATE INDEX IF NOT EXISTS peers_pinged ON peers(last_pinged)",
+        "CREATE TABLE IF NOT EXISTS peer_reputation ("
+        "  ip TEXT NOT NULL, source TEXT NOT NULL,"
+        "  label TEXT NOT NULL, queried_at INTEGER NOT NULL,"
+        "  PRIMARY KEY(ip, source))",
+        "CREATE INDEX IF NOT EXISTS peer_reputation_ip ON peer_reputation(ip)",
+        "CREATE INDEX IF NOT EXISTS peer_reputation_q  ON peer_reputation(queried_at)",
         NULL,
     };
     for (int i = 0; MIGRATIONS[i]; i++) {
@@ -622,6 +628,91 @@ db_count_peers_since(int64_t since_ts)
     sqlite3_bind_int64(s, 1, since_ts);
     int64_t n = 0;
     if (sqlite3_step(s) == SQLITE_ROW) n = sqlite3_column_int64(s, 0);
+    sqlite3_finalize(s);
+    return n;
+}
+
+/* peer_reputation read: merge all rows for an IP into a JSON object
+ * keyed by source. Returns NULL if no rows or DB closed. Caller frees. */
+char *
+db_select_reputation_json(const char *ip)
+{
+    if (!g_db || !ip || !*ip) return NULL;
+    sqlite3_stmt *s = NULL;
+    if (sqlite3_prepare_v2(g_db,
+            "SELECT source, label, queried_at FROM peer_reputation"
+            " WHERE ip = ? ORDER BY queried_at DESC",
+            -1, &s, NULL) != SQLITE_OK) return NULL;
+    sqlite3_bind_text(s, 1, ip, -1, SQLITE_TRANSIENT);
+
+    json_t *obj = json_object();
+    int n = 0;
+    while (sqlite3_step(s) == SQLITE_ROW) {
+        const char *src = (const char *)sqlite3_column_text(s, 0);
+        const char *lbl = (const char *)sqlite3_column_text(s, 1);
+        int64_t      ts = sqlite3_column_int64(s, 2);
+        if (!src || !lbl) continue;
+        json_t *e = json_object();
+        json_object_set_new(e, "label",      json_string(lbl));
+        json_object_set_new(e, "queried_at", json_integer(ts));
+        json_object_set_new(obj, src, e);
+        n++;
+    }
+    sqlite3_finalize(s);
+    if (n == 0) { json_decref(obj); return NULL; }
+    char *out = json_dumps(obj, JSON_COMPACT);
+    json_decref(obj);
+    return out;
+}
+
+void
+db_upsert_reputation(const char *ip, const char *source,
+                     const char *label, int64_t queried_at)
+{
+    if (!g_db || !ip || !source || !label) return;
+    tx_begin_if_needed();
+    sqlite3_stmt *s = NULL;
+    if (sqlite3_prepare_v2(g_db,
+            "INSERT INTO peer_reputation(ip,source,label,queried_at)"
+            " VALUES(?,?,?,?)"
+            " ON CONFLICT(ip,source) DO UPDATE SET"
+            "   label=excluded.label, queried_at=excluded.queried_at",
+            -1, &s, NULL) != SQLITE_OK) return;
+    sqlite3_bind_text (s, 1, ip,     -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (s, 2, source, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (s, 3, label,  -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(s, 4, queried_at);
+    if (sqlite3_step(s) != SQLITE_DONE) log_err("upsert reputation");
+    sqlite3_finalize(s);
+}
+
+int
+db_select_peers_missing_reputation(const char *source, int max,
+                                   int64_t since,
+                                   char (*out_ips)[64])
+{
+    if (!g_db || !source || !out_ips || max <= 0) return 0;
+    sqlite3_stmt *s = NULL;
+    if (sqlite3_prepare_v2(g_db,
+            "SELECT DISTINCT p.ip FROM peers p"
+            " LEFT JOIN peer_reputation r ON r.ip = p.ip AND r.source = ?"
+            " WHERE p.last_seen >= ?"
+            "   AND (r.ip IS NULL OR r.queried_at < ?)"
+            "   AND p.ip NOT LIKE '%:%'"        /* GreyNoise free tier is v4-only */
+            " ORDER BY p.last_seen DESC"
+            " LIMIT ?",
+            -1, &s, NULL) != SQLITE_OK) return 0;
+    sqlite3_bind_text (s, 1, source, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(s, 2, since);
+    sqlite3_bind_int64(s, 3, since);            /* re-query rows older than `since` */
+    sqlite3_bind_int  (s, 4, max);
+    int n = 0;
+    while (sqlite3_step(s) == SQLITE_ROW && n < max) {
+        const char *ip = (const char *)sqlite3_column_text(s, 0);
+        if (!ip) continue;
+        snprintf(out_ips[n], 64, "%s", ip);
+        n++;
+    }
     sqlite3_finalize(s);
     return n;
 }
