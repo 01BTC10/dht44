@@ -111,11 +111,10 @@ function netPrefix(ip: string): string {
   return parts.slice(0, 3).join(".");
 }
 
-function escHTML(s: string | null | undefined): string {
-  if (s == null) return "";
-  return String(s).replace(/[&<>"']/g, c =>
-    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;" } as any)[c]);
-}
+/* (escHTML helper removed: tooltip now renders via JSX which auto-escapes.
+ * Kept the import lightweight — peer-derived strings like v_string,
+ * country, asn_org now flow through React's text-rendering path and
+ * never touch innerHTML. See SPA security audit FIND-001/FIND-002.) */
 
 export default function Graph() {
   const fgRef = useRef<ForceGraph3DInstance | undefined>(undefined);
@@ -257,42 +256,14 @@ export default function Graph() {
     return () => window.removeEventListener("resize", refresh);
   }, []);
 
-  /* Imperative hover tooltip — same trick as before. The library hands us
-   * the node object on mouse-over; we update DOM directly so React doesn't
-   * re-render the (heavy) graph wrapper. */
-  const onNodeHover = (node: Node | null) => {
-    const tip = tipRef.current;
-    if (!tip) return;
-    if (!node) { tip.style.display = "none"; return; }
-    tip.style.display = "block";
-    const flag = node.country ? countryFlag(node.country) : "";
-    const cn   = node.country ? countryName(node.country) : "";
-    const cli  = node.v_string ? decodeVString(node.v_string)
-                               : `<span style="color:#556066">unknown client</span>`;
-    let extras = `degree ${node.deg}`;
-    if (node.as_src != null && node.as_dst != null)
-      extras += ` · s:${node.as_src} d:${node.as_dst}`;
-    if ((node.same_ip ?? 0) >= 2) extras += ` · ${node.same_ip} ports/ip`;
-    let crawler = "";
-    if (node.likely_crawler) {
-      const why =
-        (node.as_dst === 0 && (node.as_src ?? 0) >= 50 ? " — silent taker" : "") +
-        ((node.same_ip ?? 0) >= 3 ? " — multi-port host" : "");
-      crawler = `<div style="color:#ff9bb5;margin-top:3px">likely crawler${escHTML(why)}</div>`;
-    }
-    const bep51 = node.supports_bep51 === 1
-      ? `<div style="color:#6edd8a;margin-top:3px">✓ BEP 51 capable</div>`
-      : "";
-    tip.innerHTML =
-      `<div style="color:#8fc0ff">${escHTML(node.ip)}:${node.port}</div>` +
-      `<div>` +
-        (flag ? `<span style="margin-right:6px" title="${escHTML(cn)}">${flag} ${escHTML(node.country!)}</span>` : "") +
-        `<span style="color:#ddd">${cli}</span>` +
-      `</div>` +
-      `<div style="color:#556066;font-size:11px">${extras}</div>` +
-      crawler + bep51 +
-      `<div style="color:#556066;font-size:11px">${escHTML(hex(node.id, 28))}</div>`;
-  };
+  /* Hover state. The tooltip CONTENT renders via JSX (auto-escaped) so
+   * peer-controlled fields (v_string, country, asn_org) can never become
+   * an XSS vector even if a malicious DHT peer announces hostile bytes.
+   * Position is updated imperatively via ref + a mousemove listener —
+   * mutating left/top doesn't go through React, so the (heavy) graph
+   * never re-renders on cursor moves. */
+  const [hovered, setHovered] = useState<Node | null>(null);
+  const onNodeHover = (node: Node | null) => setHovered(node);
 
   /* Track cursor for tooltip placement. */
   useEffect(() => {
@@ -502,17 +473,62 @@ export default function Graph() {
           </div>
         )}
 
-        {/* Imperative tooltip */}
+        {/* Hover tooltip — content rendered via JSX so React auto-escapes
+         * every peer-derived string. Position is updated by the ref-based
+         * mousemove listener above, not by React state, so the cursor stays
+         * smooth even when sweeping over many nodes. */}
         <div
           ref={tipRef}
           style={{
-            position: "fixed", display: "none", left: 0, top: 0,
+            position: "fixed", display: hovered ? "block" : "none", left: 0, top: 0,
             background: "#14181d", border: "1px solid #2a3642", borderRadius: 3,
             padding: "6px 10px", pointerEvents: "none", maxWidth: 320,
             fontSize: 12, color: "#d8dee6",
             boxShadow: "0 4px 14px rgba(0,0,0,0.5)", zIndex: 10
           }}
-        />
+        >
+          {hovered && (() => {
+            const cn      = hovered.country ? countryName(hovered.country) : "";
+            const flag    = hovered.country ? countryFlag(hovered.country) : "";
+            const cliText = hovered.v_string ? decodeVString(hovered.v_string) : "";
+            const silent  = hovered.as_dst === 0 && (hovered.as_src ?? 0) >= 50;
+            const multiPort = (hovered.same_ip ?? 0) >= 3;
+            return (
+              <>
+                <div style={{ color: "#8fc0ff" }}>
+                  {hovered.ip}:{hovered.port}
+                </div>
+                <div>
+                  {flag && (
+                    <span style={{ marginRight: 6 }} title={cn}>
+                      {flag} {hovered.country}
+                    </span>
+                  )}
+                  {cliText
+                    ? <span style={{ color: "#ddd" }}>{cliText}</span>
+                    : <span style={{ color: "#556066" }}>unknown client</span>}
+                </div>
+                <div style={{ color: "#556066", fontSize: 11 }}>
+                  degree {hovered.deg}
+                  {hovered.as_src != null && hovered.as_dst != null
+                    && ` · s:${hovered.as_src} d:${hovered.as_dst}`}
+                  {(hovered.same_ip ?? 0) >= 2 && ` · ${hovered.same_ip} ports/ip`}
+                </div>
+                {hovered.likely_crawler ? (
+                  <div style={{ color: "#ff9bb5", marginTop: 3 }}>
+                    likely crawler
+                    {silent && " — silent taker"}
+                    {multiPort && " — multi-port host"}
+                  </div>
+                ) : null}
+                {hovered.supports_bep51 === 1 && (
+                  <div style={{ color: "#6edd8a", marginTop: 3 }}>✓ BEP 51 capable</div>
+                )}
+                <div style={{ color: "#556066", fontSize: 11 }}>{hex(hovered.id, 28)}</div>
+              </>
+            );
+          })()}
+        </div>
 
         {/* Collapsible legend */}
         <div style={{

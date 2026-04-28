@@ -6,6 +6,7 @@
 #include <fcntl.h>
 #include <jansson.h>
 #include <libwebsockets.h>
+#include <limits.h>
 #include <maxminddb.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -739,13 +740,23 @@ static const char BUILTIN_INDEX[] =
 " infohashes:['hash','source','times_queried','last_seen'],\n"
 " bep44:['target','mutable','pk','seq','last_seen']\n"
 "}[tab];}\n"
+/* esc(): HTML-escape every untrusted string the embedded JS pours into
+ * innerHTML below. Peer-controlled fields (v_string, asn_org, etc.)
+ * arrive via the /api/peers, /api/queries, /api/bep44 endpoints;
+ * without escaping, a malicious DHT peer announcing a hostile v-string
+ * would inject script into anyone using this fallback dashboard. JSON
+ * values for the dashboard are produced by the daemon itself today,
+ * but defense in depth keeps the surface closed even if any /api
+ * endpoint gains a relayed field later. */
+"function esc(s){return String(s==null?'':s).replace(/[&<>\"\\\\']/g,"
+"  c=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;','\\\\'':'&#39;'}[c]));}\n"
 "function cell(r,k){const v=r[k];\n"
 " if(v==null)return '';\n"
-" if(k==='geo'&&typeof v==='object')return `<span class=geo>${v.country||''} ${v.city||''} AS${v.asn||''}</span>`;\n"
-" if(['target','hash','pk','node_id','v_string'].includes(k))return `<span class=hex>${hex(v,16)}</span>`;\n"
-" if(k==='last_seen'||k==='first_seen'||k==='ts')return new Date(v*1000).toLocaleTimeString();\n"
-" return v;}\n"
-"function render(){let c=cols();let h=c.map(k=>`<th>${k}</th>`).join('');\n"
+" if(k==='geo'&&typeof v==='object')return `<span class=geo>${esc(v.country||'')} ${esc(v.city||'')} AS${esc(v.asn||'')}</span>`;\n"
+" if(['target','hash','pk','node_id','v_string'].includes(k))return `<span class=hex>${esc(hex(v,16))}</span>`;\n"
+" if(k==='last_seen'||k==='first_seen'||k==='ts')return esc(new Date(v*1000).toLocaleTimeString());\n"
+" return esc(v);}\n"
+"function render(){let c=cols();let h=c.map(k=>`<th>${esc(k)}</th>`).join('');\n"
 " let body=rows.slice(0,500).map(r=>'<tr>'+c.map(k=>`<td>${cell(r,k)}</td>`).join('')+'</tr>').join('');\n"
 " $('#pane').innerHTML=`<table><thead><tr>${h}</tr></thead><tbody>${body}</tbody></table>`;}\n"
 "async function load(){let r=await fetch('/api/'+tab+'?limit=500');rows=await r.json();render();}\n"
@@ -883,7 +894,15 @@ cleanup:
  * ============================================================ */
 
 static struct lws_context *g_ctx = NULL;
-static char                g_static_dir[512] = "";
+static char                g_static_dir[512]      = "";
+/* Canonicalized form of g_static_dir (resolved once at init via realpath).
+ * Used in dispatch_http to verify that the resolved path of any served
+ * static asset stays inside the configured static dir, even after symlink
+ * resolution and `..`-handling. Trailing '/' is appended at init so the
+ * containment check is a clean prefix match without partial-name false
+ * positives (e.g. "/var/www/dht44.com" vs "/var/www/dht44.com.bak"). */
+static char                g_static_dir_real[512] = "";
+static size_t              g_static_dir_real_len  = 0;
 
 static int
 dispatch_http(struct lws *wsi)
@@ -912,10 +931,27 @@ dispatch_http(struct lws *wsi)
                                   BUILTIN_INDEX);
     }
 
-    /* Static assets from configured dir, e.g. /main.js, /main.css */
+    /* Static assets from configured dir, e.g. /main.js, /main.css.
+     *
+     * Defense in depth against path traversal. Three layers:
+     *   1. The substring check rejects the canonical form `..` in
+     *      the URI (libwebsockets URL-decodes percent-encoding before
+     *      handing us WSI_TOKEN_GET_URI, so `%2e%2e` is also caught).
+     *   2. realpath() resolves symlinks and `.`/`..` components in the
+     *      assembled candidate path.
+     *   3. We require the resolved path to fall under the canonicalized
+     *      static dir (g_static_dir_real, with trailing '/' so a
+     *      partial-prefix overlap with a sibling directory can't leak).
+     * Any failure → 404, never partial. */
     if (g_static_dir[0] && uri[0] == '/' && strstr(uri, "..") == NULL) {
         char path[1024];
         snprintf(path, sizeof(path), "%s%s", g_static_dir, uri);
+        char resolved[PATH_MAX];
+        if (g_static_dir_real_len > 0 && realpath(path, resolved) != NULL
+            && strncmp(resolved, g_static_dir_real, g_static_dir_real_len) != 0) {
+            /* resolved exists but escaped the static dir → refuse. */
+            return lws_return_http_status(wsi, 404, NULL);
+        }
         struct stat st;
         if (stat(path, &st) == 0 && S_ISREG(st.st_mode)) {
             const char *ct = "application/octet-stream";
@@ -1162,6 +1198,23 @@ http_ws_init(uint16_t port, const char *static_dir)
     }
     if (static_dir && *static_dir) {
         snprintf(g_static_dir, sizeof(g_static_dir), "%s", static_dir);
+        /* Canonicalize once at init so we don't pay realpath() cost per
+         * request and so the prefix-match below is unambiguous. The
+         * trailing '/' guards against directory-name partial overlap. */
+        char canon[PATH_MAX];
+        if (realpath(static_dir, canon) != NULL) {
+            int n = snprintf(g_static_dir_real, sizeof(g_static_dir_real),
+                             "%s/", canon);
+            if (n > 0 && (size_t)n < sizeof(g_static_dir_real)) {
+                g_static_dir_real_len = (size_t)n;
+            } else {
+                fprintf(stderr, TAG "warn: static dir path too long for canonicalization\n");
+                g_static_dir_real[0] = 0;
+            }
+        } else {
+            fprintf(stderr, TAG "warn: realpath(%s) failed: %s\n",
+                    static_dir, strerror(errno));
+        }
     }
     fprintf(stderr, TAG "listening on %s:%u%s\n",
             info.iface ? info.iface : "*", port,

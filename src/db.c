@@ -515,6 +515,12 @@ char *
 db_select_peers_json(int limit, const char *order)
 {
     if (limit <= 0 || limit > 5000) limit = 500;
+    /* SQLi safety: `ord` is selected from a closed-set allowlist of
+     * literal strings. The user-supplied `order` query parameter only
+     * drives an `strcmp` match against fixed values; an unmatched value
+     * leaves the default in place. NEVER substitute `order` directly
+     * into the SQL via %s — `ord` must always be one of the literals
+     * below. The actual LIMIT goes through sqlite3_bind_int (`?`). */
     const char *ord = "last_seen DESC";
     if (order && strcmp(order, "first_seen") == 0) ord = "first_seen DESC";
     if (order && strcmp(order, "rtt")       == 0) ord = "rtt_ms_ewma ASC";
@@ -1170,6 +1176,11 @@ int
 db_sample_infohashes(uint8_t *out, int max_count)
 {
     if (!g_db || !out || max_count <= 0) return 0;
+    /* SQLi safety: `max_count` is an `int` callable only from internal
+     * code paths (BEP 51 sweeper in crawl.c). Not user-controlled.
+     * Bound the value before formatting so a future caller passing a
+     * pathological size won't blow past `sql[]`. */
+    if (max_count > 10000) max_count = 10000;
     char sql[128];
     snprintf(sql, sizeof(sql),
         "SELECT hash FROM infohashes ORDER BY RANDOM() LIMIT %d",
@@ -1232,7 +1243,9 @@ db_select_stats_json(void)
     json_object_set_new(o, "peers_alive_24h", json_integer(alive_24h));
     json_object_set_new(o, "peers_stale",
         json_integer(db_count_peers() - alive_24h));
-    /* rates: rows in last 60s */
+    /* rates: rows in last 60s. SQLi safety: `now` is `time(NULL)` on
+     * the server; never user-controlled. Formatted as %lld with
+     * sufficient buffer. */
     char sql[256];
     snprintf(sql, sizeof(sql),
         "SELECT COUNT(*) FROM queries WHERE ts >= %lld", (long long)(now - 60));
