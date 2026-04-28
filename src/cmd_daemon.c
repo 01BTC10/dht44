@@ -40,6 +40,8 @@
 #include "ipc.h"
 #include "lookup.h"
 #include "observe.h"
+#include "classifier.h"
+#include "deny.h"
 #include "redact.h"
 #include "reputation.h"
 #include "state.h"
@@ -1374,6 +1376,11 @@ cmd_daemon(int argc, char **argv)
             }
         }
         if (rep_dir) reputation_load_dir(rep_dir);
+
+        /* Inbound + outbound deny set. Empty at boot; populated lazily
+         * from the dht_wrap inline reputation/rate-limit checks and
+         * the 60s classifier-refresh tick below. */
+        deny_init();
     }
     if (g_args.crawl) {
         crawl_start(g_args.crawl_workers, g_args.crawl_pps);
@@ -1405,6 +1412,9 @@ cmd_daemon(int argc, char **argv)
     int    bootstrap_pinged = 0;
     int    last_good = -1;
     time_t next_flush    = time(NULL) + 1;      /* db + ws heartbeat */
+    /* deny-list refresh: every 60s walk the recently-active peers,
+     * run classify_compute, deny_add anything class >=monitor. */
+    time_t next_deny_refresh = time(NULL) + 60;
 
     while (!g_exit) {
         int wrap_wake_ms = 1000;
@@ -1561,7 +1571,63 @@ cmd_daemon(int argc, char **argv)
         if (now >= next_flush) {
             db_flush();
             http_ws_heartbeat();
+            deny_tick(now);                    /* evict expired entries */
             next_flush = now + 1;
+        }
+        if (now >= next_deny_refresh) {
+            /* Pull up to 1000 recently-active (last 6h) peers, run the
+             * shared classifier, deny_add class>=monitor. The 6h window
+             * matches the alive-bucket the dashboard tracks; older
+             * peers haven't sent us packets in a while and their class
+             * will be re-confirmed if they come back. */
+            static struct db_peer_signal_row buf[1000];
+            int n = db_select_peers_with_signals(
+                        (int)(sizeof(buf)/sizeof(buf[0])),
+                        (int64_t)now - 6 * 3600, buf);
+            int added = 0;
+            for (int i = 0; i < n; i++) {
+                struct peer_signals sig = {0};
+                sig.as_src       = buf[i].as_src;
+                sig.as_dst       = buf[i].as_dst;
+                sig.same_ip      = buf[i].same_ip;
+                sig.queries_in   = buf[i].queries_in;
+                sig.queries_out  = buf[i].queries_out;
+                sig.ro           = buf[i].ro;
+                sig.bep42_ok     = buf[i].bep42_ok;
+                sig.has_v_string = buf[i].has_v_string;
+                /* asn_org / greynoise / iblocklist enrichment skipped
+                 * here — the inline reputation_lookup in dht_wrap
+                 * already handles iBlockList strong-deny; the 60s
+                 * refresh only adds behavioural denials. (Future:
+                 * also pre-fetch geoip + greynoise per peer if we
+                 * find the score is consistently off because of
+                 * missing context.) */
+                struct classify_result res;
+                classify_compute(&sig, &res);
+                if (res.cls && (strcmp(res.cls, "honeypot") == 0
+                                || strcmp(res.cls, "monitor") == 0)) {
+                    struct sockaddr_storage ss = {0};
+                    socklen_t ss_len = 0;
+                    if (parse_ip_lenient(buf[i].ip, &ss, &ss_len)) {
+                        if (ss.ss_family == AF_INET)
+                            ((struct sockaddr_in *)&ss)->sin_port =
+                                htons((uint16_t)buf[i].port);
+                        else if (ss.ss_family == AF_INET6)
+                            ((struct sockaddr_in6 *)&ss)->sin6_port =
+                                htons((uint16_t)buf[i].port);
+                        deny_add((struct sockaddr *)&ss, ss_len,
+                                 DENY_REASON_CLASSIFIER, 3600);
+                        added++;
+                    }
+                }
+            }
+            int total; int by_reason[3];
+            deny_stats(&total, by_reason);
+            fprintf(stderr,
+                "[dht44:deny] refresh scanned=%d added=%d "
+                "set: rep=%d rate=%d cls=%d total=%d\n",
+                n, added, by_reason[0], by_reason[1], by_reason[2], total);
+            next_deny_refresh = now + 60;
         }
     }
 

@@ -48,4 +48,22 @@ int reputation_lookup(const struct sockaddr *addr,
 int reputation_iblocklist_count(void);
 int reputation_tor_count(void);
 
+/* "Strong" classification of a (source, label) pair — i.e. should this
+ * hit alone justify denying the peer outright?
+ *
+ * For source="iblocklist" returns 1 when label starts with one of the
+ *   strong category prefixes (AP2P, Anti-P2P, Bogon, Honeypot,
+ *   Hijacked, Spider, Brute Force, Spambot) OR contains a known
+ *   anti-P2P operator name (MarkMonitor, IP Echelon, Irdeto, Trident
+ *   Media Guard, etc.).
+ * For source="greynoise" returns 1 when label starts with "malicious".
+ * For source="tor" returns 0 — Tor exits are tagged but not denied
+ *   on sight; the rate limiter and classifier handle them if they
+ *   misbehave.
+ *
+ * Used in two places: http_ws.c classify_peer (where the strong-hit
+ * adds +3 score) and dht_wrap.c packet-receive path (where the
+ * strong-hit causes deny_add). Same rule, one source of truth. */
+int reputation_label_is_strong(const char *source, const char *label);
+
 #endif

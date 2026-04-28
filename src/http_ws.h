@@ -2,6 +2,8 @@
 #define DHT44_HTTP_WS_H
 
 #include <stdint.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
 
 /*
  * Combined HTTP + WebSocket server (libwebsockets) integrated with the
@@ -40,5 +42,10 @@ void http_ws_publish(const char *topic, const char *json_str);
 
 /* Periodic tick: emits a stats snapshot to the "stats" topic. */
 void http_ws_heartbeat(void);
+
+/* Parse an IP string (possibly redacted CIDR form like "1.2.3.0/24")
+ * into a sockaddr_storage. Returns 1 on success. Used by both the
+ * classifier path here and the deny refresh tick in cmd_daemon.c. */
+int parse_ip_lenient(const char *ip, struct sockaddr_storage *ss, socklen_t *ss_len);
 
 #endif

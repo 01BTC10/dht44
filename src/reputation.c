@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 #define TAG "[dht44:reputation] "
 
@@ -397,3 +398,55 @@ reputation_lookup(const struct sockaddr *addr,
 
 int reputation_iblocklist_count(void) { return g_iblocklist_n; }
 int reputation_tor_count(void)        { return g_tor_n; }
+
+/* Case-insensitive substring search. Local copy because the analogous
+ * helper in http_ws.c is `static` to that translation unit. */
+static int
+contains_ci(const char *hay, const char *needle)
+{
+    if (!hay || !needle) return 0;
+    size_t nl = strlen(needle);
+    if (!nl) return 0;
+    for (const char *p = hay; *p; p++) {
+        if (strncasecmp(p, needle, nl) == 0) return 1;
+    }
+    return 0;
+}
+
+int
+reputation_label_is_strong(const char *source, const char *label)
+{
+    if (!source || !label) return 0;
+
+    if (strcmp(source, "iblocklist") == 0) {
+        static const char *STRONG_PREFIX[] = {
+            "AP2P", "Anti-P2P", "Bogon", "Honeypot",
+            "Hijacked", "Spider", "Brute Force", "Spambot",
+            NULL
+        };
+        for (int i = 0; STRONG_PREFIX[i]; i++) {
+            size_t pl = strlen(STRONG_PREFIX[i]);
+            if (strncasecmp(label, STRONG_PREFIX[i], pl) == 0) return 1;
+        }
+        static const char *OPERATOR_NEEDLES[] = {
+            "markmonitor", "ip-echelon", "ip echelon", "irdeto",
+            "nagra", "friend mts", "opsec", "ceg tek",
+            "rightscorp", "excipio",
+            "trident media guard", "tmg",
+            "bayshore", "media protector", "antipiracy",
+            "anti-piracy", "swarm", "honeyswarm",
+            NULL
+        };
+        for (int i = 0; OPERATOR_NEEDLES[i]; i++) {
+            if (contains_ci(label, OPERATOR_NEEDLES[i])) return 1;
+        }
+        return 0;
+    }
+
+    if (strcmp(source, "greynoise") == 0) {
+        return strncmp(label, "malicious", 9) == 0;
+    }
+
+    /* tor + future sources: not strong-deny by themselves */
+    return 0;
+}

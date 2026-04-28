@@ -14,6 +14,7 @@
 #include <sys/stat.h>
 #include <time.h>
 
+#include "classifier.h"
 #include "db.h"
 #include "dht_wrap.h"
 #include "reputation.h"
@@ -79,8 +80,11 @@ lookup_uint(MMDB_lookup_result_s *r, json_t *out, const char *dst, const char *a
  * "2001:16a2:7199::/48") or a plain IPv4/IPv6 string. Strips the
  * "/N" suffix if present, tries AF_INET first, falls back to AF_INET6.
  * Returns 1 on success and fills *ss + *ss_len, 0 on failure.
+ *
+ * Public via http_ws.h — also used by the deny refresh tick in
+ * cmd_daemon.c.
  */
-static int
+int
 parse_ip_lenient(const char *ip, struct sockaddr_storage *ss, socklen_t *ss_len)
 {
     if (!ip || !*ip) return 0;
@@ -253,199 +257,42 @@ country_stats_json(int limit)
 }
 
 /* ============================================================
- * Crawler / monitor / honeypot classifier
+ * Crawler / monitor / honeypot classifier — JSON adaptor.
  *
- * Read-time only — no schema change. Each peer row is scored against a small
- * set of signals (asymmetric edge counts, per-IP port density, BEP 5 read-only
- * advertisement, BEP 42 mismatch with traffic, missing v_string with traffic,
- * known anti-piracy ASN, datacenter ASN with port density). The score maps
- * to a class label: ok / crawler / monitor / honeypot.
+ * The scoring core lives in classifier.c (struct peer_signals →
+ * struct classify_result) so the daemon-side deny refresh tick in
+ * cmd_daemon.c can call the same logic directly. This function is
+ * just the bridge from the per-peer json_t row to that core, plus
+ * the reputation lookups that are too JSON-shaped for the core API.
  *
- * The legacy `likely_crawler: 0|1` field is preserved (= score >= 1) so the
- * graph view and any external scrapers keep working.
+ * The legacy `likely_crawler: 0|1` field is preserved (= score >= 1)
+ * so the graph view and any external scrapers keep working.
  * ============================================================ */
 
-static const char *MONITOR_ASN_KEYWORDS[] = {
-    "markmonitor", "ip-echelon", "ip echelon", "irdeto", "nagra",
-    "friend mts", "opsec", "ceg tek", "rightscorp", "excipio", NULL
-};
-
-static const char *DC_ASN_KEYWORDS[] = {
-    "hetzner", "ovh", "digitalocean", "amazon", "google llc", "google cloud",
-    "microsoft", "azure", "linode", "vultr", "contabo", "leaseweb",
-    "datacamp", "choopa", NULL
-};
-
-static int
-contains_ci(const char *hay, const char *needle)
-{
-    if (!hay || !needle) return 0;
-    size_t nl = strlen(needle);
-    if (!nl) return 0;
-    for (const char *p = hay; *p; p++) {
-        if (strncasecmp(p, needle, nl) == 0) return 1;
-    }
-    return 0;
-}
-
-static const char *
-match_keyword(const char *org, const char *const *kws)
-{
-    if (!org) return NULL;
-    for (int i = 0; kws[i]; i++) {
-        if (contains_ci(org, kws[i])) return kws[i];
-    }
-    return NULL;
-}
-
-/* Append "<sep><text>" to dst[0..*used] if it fits. *used is bumped on success. */
-static void
-append_reason(char *dst, size_t cap, size_t *used, const char *text)
-{
-    if (!text || !*text || *used + 1 >= cap) return;
-    int n;
-    if (*used == 0) n = snprintf(dst + *used, cap - *used, "%s", text);
-    else            n = snprintf(dst + *used, cap - *used, " \xc2\xb7 %s", text);
-    if (n > 0) *used += (size_t)n;
-}
-
 /* Mutates row: adds crawler_score / crawler_class / crawler_signals /
- * crawler_reason / likely_crawler. */
+ * crawler_reason / likely_crawler / reputation. */
 static void
 classify_peer(json_t *row, json_t *geo)
 {
-    int64_t as_src   = json_integer_value(json_object_get(row, "as_src"));
-    int64_t as_dst   = json_integer_value(json_object_get(row, "as_dst"));
-    int64_t same_ip  = json_integer_value(json_object_get(row, "same_ip"));
-    int64_t qin      = json_integer_value(json_object_get(row, "queries_in"));
-    int64_t qout     = json_integer_value(json_object_get(row, "queries_out"));
+    /* Pull raw fields off the row + geo into a peer_signals. */
+    struct peer_signals sig = {0};
+    sig.as_src       = json_integer_value(json_object_get(row, "as_src"));
+    sig.as_dst       = json_integer_value(json_object_get(row, "as_dst"));
+    sig.same_ip      = json_integer_value(json_object_get(row, "same_ip"));
+    sig.queries_in   = json_integer_value(json_object_get(row, "queries_in"));
+    sig.queries_out  = json_integer_value(json_object_get(row, "queries_out"));
     json_t *ro_v     = json_object_get(row, "ro");
     json_t *b42_v    = json_object_get(row, "bep42_ok");
     json_t *v_str    = json_object_get(row, "v_string");
-    const char *org  = geo ? json_string_value(json_object_get(geo, "asn_org")) : NULL;
+    sig.ro           = json_is_integer(ro_v)  ? (int)json_integer_value(ro_v)  : -1;
+    sig.bep42_ok     = json_is_integer(b42_v) ? (int)json_integer_value(b42_v) : -1;
+    sig.has_v_string = (v_str && !json_is_null(v_str)) ? 1 : 0;
+    sig.asn_org      = geo ? json_string_value(json_object_get(geo, "asn_org")) : NULL;
 
-    int score = 0;
-    json_t *signals = json_array();
-    char reason[1024];
-    size_t rused = 0;
-    reason[0] = 0;
-    char tmp[160];
-
-    /* Track which signals fired so the class assignment below can decide
-     * "this peer's signals are explained by being a seedbox / VPS user
-     * rather than a crawler". Avoids re-checking each condition twice. */
-    int sig_silent_taker = 0;
-    int sig_read_only    = 0;
-    int sig_asym_in      = 0;
-    int sig_no_v_string  = 0;
-
-    if (as_dst == 0 && as_src >= 50) {
-        score += 2;
-        sig_silent_taker = 1;
-        json_array_append_new(signals, json_string("silent_taker"));
-        snprintf(tmp, sizeof(tmp),
-                 "returned %lld distinct peers in find_node replies but"
-                 " never appears in anyone else's routing table",
-                 (long long)as_src);
-        append_reason(reason, sizeof(reason), &rused, tmp);
-    }
-
-    if (same_ip >= 50) {
-        score += 3;
-        json_array_append_new(signals, json_string("port_farm_mass"));
-        snprintf(tmp, sizeof(tmp),
-                 "%lld ports on this IP (datacenter farm)",
-                 (long long)same_ip);
-        append_reason(reason, sizeof(reason), &rused, tmp);
-    } else if (same_ip >= 10) {
-        score += 2;
-        json_array_append_new(signals, json_string("port_farm_strong"));
-        snprintf(tmp, sizeof(tmp),
-                 "%lld ports on this IP (likely seedbox / VPN exit)",
-                 (long long)same_ip);
-        append_reason(reason, sizeof(reason), &rused, tmp);
-    } else if (same_ip >= 3) {
-        /* port_farm_mild is informational only — 3+ ports on one IP is
-         * the normal NAT'd household / multi-client case. Reported in
-         * the signal list so users can still see it, but no longer
-         * contributes to the score (was +1, dropped to 0). */
-        json_array_append_new(signals, json_string("port_farm_mild"));
-        snprintf(tmp, sizeof(tmp),
-                 "%lld distinct ports on this IP (multi-client / NAT)",
-                 (long long)same_ip);
-        append_reason(reason, sizeof(reason), &rused, tmp);
-    }
-
-    if (json_is_integer(ro_v) && json_integer_value(ro_v) == 1) {
-        score += 2;
-        sig_read_only = 1;
-        json_array_append_new(signals, json_string("read_only"));
-        append_reason(reason, sizeof(reason), &rused,
-                      "advertises BEP 5 read-only (won't respond)");
-    }
-
-    if (json_is_integer(b42_v) && json_integer_value(b42_v) == 0
-        && (qin + qout) >= 50) {
-        score += 1;
-        json_array_append_new(signals, json_string("bep42_bad"));
-        append_reason(reason, sizeof(reason), &rused,
-                      "ignores BEP 42 with high query volume");
-    }
-
-    if (qin >= 100 && qin >= 5 * (qout > 0 ? qout : 1)) {
-        score += 2;
-        sig_asym_in = 1;
-        json_array_append_new(signals, json_string("asymmetric_in"));
-        snprintf(tmp, sizeof(tmp),
-                 "queries us heavily while we rarely query them back"
-                 " (%lld inbound / %lld outbound)",
-                 (long long)qin, (long long)qout);
-        append_reason(reason, sizeof(reason), &rused, tmp);
-    }
-
-    if ((!v_str || json_is_null(v_str)) && (qin + qout) >= 20) {
-        score += 1;
-        sig_no_v_string = 1;
-        json_array_append_new(signals, json_string("no_v_string"));
-        append_reason(reason, sizeof(reason), &rused,
-                      "no client identifier, frequent traffic");
-    }
-
-    const char *mon = match_keyword(org, MONITOR_ASN_KEYWORDS);
-    int is_dc = match_keyword(org, DC_ASN_KEYWORDS) != NULL;
-    if (mon) {
-        score += 4;
-        snprintf(tmp, sizeof(tmp), "monitor_asn:%s", org ? org : mon);
-        json_array_append_new(signals, json_string(tmp));
-        snprintf(tmp, sizeof(tmp),
-                 "ASN matches known anti-piracy operator: %s", org ? org : mon);
-        append_reason(reason, sizeof(reason), &rused, tmp);
-    } else if (is_dc && same_ip >= 5) {
-        score += 1;
-        snprintf(tmp, sizeof(tmp), "dc_asn:%s", org);
-        json_array_append_new(signals, json_string(tmp));
-        snprintf(tmp, sizeof(tmp),
-                 "datacenter ASN (%s) with %lld peers on this IP",
-                 org, (long long)same_ip);
-        append_reason(reason, sizeof(reason), &rused, tmp);
-    }
-
-    /* External reputation: local lists (iblocklist, tor) via reputation.c
-     * and the GreyNoise cache populated by the out-of-process helper.
-     * Both are emitted as a `reputation` object on the row so the UI
-     * can show full detail without re-querying. Scoring:
-     *   iblocklist hit  : +3 (community-curated anti-P2P operator list)
-     *   tor exit        : +1 (informational — rarely seen in DHT)
-     *   greynoise:malicious : +3
-     *   greynoise:benign    : 0 (informational; the seedbox-like clause
-     *                            already prevents mislabeling research
-     *                            scanners as honeypots if their other
-     *                            signals are clean)
-     *   anything else        : 0 */
-    json_t      *rep_obj           = NULL;
-    int          sig_known_monitor = 0;     /* iblocklist or greynoise:malicious */
-    int          sig_known_benign  = 0;     /* greynoise:benign (Censys, Shodan, ...) */
-
+    /* Reputation: do the lookups once and emit the JSON `reputation`
+     * object. Pass labels to the scoring core via peer_signals so it
+     * applies the same rules without re-running the lookups. */
+    json_t *rep_obj = NULL;
     const char *ip_str = json_string_value(json_object_get(row, "ip"));
     if (ip_str && *ip_str) {
         struct sockaddr_storage ss;
@@ -454,93 +301,19 @@ classify_peer(json_t *row, json_t *geo)
         if (parse_ip_lenient(ip_str, &ss, &ss_len)
             && reputation_lookup((struct sockaddr *)&ss, &rs, &rl)
             && rs && rl) {
-            if (!rep_obj) rep_obj = json_object();
+            rep_obj = json_object();
             json_t *e = json_object();
             json_object_set_new(e, "label", json_string(rl));
             json_object_set_new(rep_obj, rs, e);
-
-            if (strcmp(rs, "iblocklist") == 0) {
-                /* iBlockList sweeps in lots of "suspected monitor"
-                 * networks the curator wasn't sure about — universities,
-                 * generic company names, regional carriers. Score those
-                 * as 0 (informational tag only) and reserve the +3
-                 * monitor weight for either:
-                 *   (a) category prefixes that imply BT-context bad
-                 *       behavior (AP2P, Bogon, Honeypot, ...), or
-                 *   (b) known anti-P2P operator names appearing in the
-                 *       label (MarkMonitor, Trident Media Guard, IP
-                 *       Echelon, Irdeto, ...) — same list we apply to
-                 *       ASN-org matching above so both paths agree. */
-                int strong = 0, mild = 0;
-                static const char *STRONG_PREFIX[] = {
-                    "AP2P", "Anti-P2P", "Bogon", "Honeypot",
-                    "Hijacked", "Spider", "Brute Force", "Spambot",
-                    NULL
-                };
-                static const char *MILD_PREFIX[] = {
-                    "Botnet", "Proxy", NULL
-                };
-                /* Anti-P2P operator names — superset of
-                 * MONITOR_ASN_KEYWORDS plus a couple of operators that
-                 * tend to show up in iBlockList descriptions but not as
-                 * registered ASN orgs. */
-                static const char *OPERATOR_NEEDLES[] = {
-                    "markmonitor", "ip-echelon", "ip echelon", "irdeto",
-                    "nagra", "friend mts", "opsec", "ceg tek",
-                    "rightscorp", "excipio",
-                    "trident media guard", "tmg",
-                    "bayshore", "media protector", "antipiracy",
-                    "anti-piracy", "swarm", "honeyswarm",
-                    NULL
-                };
-                for (int k = 0; STRONG_PREFIX[k]; k++)
-                    if (strncasecmp(rl, STRONG_PREFIX[k],
-                                    strlen(STRONG_PREFIX[k])) == 0) {
-                        strong = 1; break;
-                    }
-                if (!strong)
-                    for (int k = 0; OPERATOR_NEEDLES[k]; k++)
-                        if (contains_ci(rl, OPERATOR_NEEDLES[k])) {
-                            strong = 1; break;
-                        }
-                if (!strong) for (int k = 0; MILD_PREFIX[k]; k++)
-                    if (strncasecmp(rl, MILD_PREFIX[k],
-                                    strlen(MILD_PREFIX[k])) == 0) {
-                        mild = 1; break;
-                    }
-                if (strong) {
-                    score += 3;
-                    sig_known_monitor = 1;
-                    snprintf(tmp, sizeof(tmp), "iblocklist:%s", rl);
-                    json_array_append_new(signals, json_string(tmp));
-                    snprintf(tmp, sizeof(tmp),
-                             "on community blocklist (%s)", rl);
-                    append_reason(reason, sizeof(reason), &rused, tmp);
-                } else if (mild) {
-                    score += 1;
-                    snprintf(tmp, sizeof(tmp), "iblocklist:%s", rl);
-                    json_array_append_new(signals, json_string(tmp));
-                } else {
-                    /* Tagged for the UI chip; no score impact. */
-                    snprintf(tmp, sizeof(tmp), "iblocklist:%s", rl);
-                    json_array_append_new(signals, json_string(tmp));
-                }
-            } else if (strcmp(rs, "tor") == 0) {
-                score += 1;
-                json_array_append_new(signals, json_string("tor_exit"));
-                append_reason(reason, sizeof(reason), &rused,
-                              "Tor exit node");
-            }
+            sig.rep_source = rs;
+            sig.rep_label  = rl;
         }
-
         char *gn_json = db_select_reputation_json(ip_str);
         if (gn_json) {
             json_error_t je;
             json_t *gn = json_loads(gn_json, 0, &je);
             free(gn_json);
             if (gn && json_is_object(gn)) {
-                /* Merge any DB-sourced rows that we haven't already
-                 * emitted from the local-list path. */
                 const char *src;
                 json_t     *entry;
                 json_object_foreach(gn, src, entry) {
@@ -551,67 +324,34 @@ classify_peer(json_t *row, json_t *geo)
                     if (strcmp(src, "greynoise") == 0) {
                         const char *lbl = json_string_value(
                                               json_object_get(entry, "label"));
-                        if (lbl && strncmp(lbl, "malicious", 9) == 0) {
-                            score += 3;
-                            sig_known_monitor = 1;
-                            snprintf(tmp, sizeof(tmp), "greynoise:%s", lbl);
-                            json_array_append_new(signals, json_string(tmp));
-                            append_reason(reason, sizeof(reason), &rused,
-                                          "GreyNoise: classified malicious");
-                        } else if (lbl && strncmp(lbl, "benign", 6) == 0) {
-                            sig_known_benign = 1;
-                            snprintf(tmp, sizeof(tmp), "greynoise:%s", lbl);
-                            json_array_append_new(signals, json_string(tmp));
-                            append_reason(reason, sizeof(reason), &rused,
-                                          "GreyNoise: known benign scanner");
-                        }
+                        if (lbl && strncmp(lbl, "malicious", 9) == 0)
+                            sig.gn_malicious = 1;
+                        else if (lbl && strncmp(lbl, "benign", 6) == 0)
+                            sig.gn_benign = 1;
                     }
                 }
                 json_decref(gn);
             } else if (gn) json_decref(gn);
         }
     }
-
     if (rep_obj) json_object_set_new(row, "reputation", rep_obj);
 
-    /* "seedbox" pattern: peer is on a known datacenter / hosting ASN, has
-     * a real client identifier, and shows none of the crawler-shaped
-     * signals (not silent, not asymmetric inbound, doesn't advertise
-     * read-only, has v_string, isn't on an anti-piracy ASN). When this
-     * is true AND the peer would otherwise be tagged crawler/monitor by
-     * raw score, label it "seedbox" instead — informative, not a
-     * suspicion. Peers with no signals at all stay "ok" (no badge).
-     *
-     * If GreyNoise has labeled the peer "benign" (Censys, Shodan, etc.)
-     * we DO NOT downgrade to seedbox — we keep the raw class but the UI
-     * picks up the greynoise:benign signal and color-codes it. */
-    int is_seedbox_like = is_dc && !mon
-                        && !sig_known_monitor
-                        && !sig_known_benign
-                        && v_str && !json_is_null(v_str)
-                        && !sig_silent_taker
-                        && !sig_asym_in
-                        && !sig_read_only
-                        && !sig_no_v_string;
+    /* Scoring + classification — single source of truth in classifier.c. */
+    struct classify_result res;
+    classify_compute(&sig, &res);
 
-    /* Class thresholds. Tightened crawler floor from score>=1 to >=2 so
-     * a single weak signal (bep42_bad alone, port_farm_mild) doesn't
-     * label a peer as suspect. honeypot still requires score>=5; that
-     * floor catches monitor_asn (+4) plus any other signal, and stacked
-     * crawler-shaped behaviors. */
-    const char *cls;
-    if      (score >= 5)        cls = "honeypot";
-    else if (is_seedbox_like && score >= 2) cls = "seedbox";
-    else if (score >= 3)        cls = "monitor";
-    else if (score >= 2)        cls = "crawler";
-    else                        cls = "ok";
-
-    json_object_set_new(row, "crawler_score",   json_integer(score));
-    json_object_set_new(row, "crawler_class",   json_string(cls));
-    json_object_set_new(row, "crawler_signals", signals);
-    json_object_set_new(row, "crawler_reason",  json_string(reason));
+    /* Project result into the JSON row. */
+    json_t *signals_arr = json_array();
+    for (int i = 0; i < res.n_signals; i++) {
+        json_array_append_new(signals_arr, json_string(res.signals[i]));
+    }
+    json_object_set_new(row, "crawler_score",   json_integer(res.score));
+    json_object_set_new(row, "crawler_class",   json_string(res.cls));
+    json_object_set_new(row, "crawler_signals", signals_arr);
+    json_object_set_new(row, "crawler_reason",  json_string(res.reason));
     /* Legacy single-bit field — kept for graph view + external scrapers. */
-    json_object_set_new(row, "likely_crawler",  json_integer(score >= 1 ? 1 : 0));
+    json_object_set_new(row, "likely_crawler",
+                        json_integer(res.score >= 1 ? 1 : 0));
 }
 
 /* Wrap a JSON array of peer rows with geoip annotations + classifier output. */

@@ -11,6 +11,8 @@
 #include <string.h>
 #include <time.h>
 
+#include "deny.h"
+#include "dht_wrap.h"
 #include "redact.h"
 
 static sqlite3 *g_db            = NULL;
@@ -861,6 +863,61 @@ db_select_closest_alive(int family,
     return heap_n;
 }
 
+/* Pull recently-active peers with their edge-derived signals for the
+ * deny refresh tick. Joins peers with src/dst/ipc CTEs the same way
+ * the /api/peers JSON path does. Bounded at max=1000 per call to keep
+ * the 60s tick cheap. */
+int
+db_select_peers_with_signals(int max, int64_t since_ts,
+                             struct db_peer_signal_row *out)
+{
+    if (!g_db || !out || max <= 0) return 0;
+    sqlite3_stmt *s = NULL;
+    static const char *SQL =
+        "WITH src AS (SELECT src_ip ip, src_port port, COUNT(*) c FROM edges GROUP BY 1,2),"
+        "     dst AS (SELECT dst_ip ip, dst_port port, COUNT(*) c FROM edges GROUP BY 1,2),"
+        "     ipc AS (SELECT ip, COUNT(*) c FROM peers GROUP BY 1)"
+        " SELECT p.ip, p.port,"
+        "        COALESCE(src.c,0) AS as_src,"
+        "        COALESCE(dst.c,0) AS as_dst,"
+        "        COALESCE(ipc.c,0) AS same_ip,"
+        "        p.queries_in, p.queries_out,"
+        "        p.ro, p.bep42_ok,"
+        "        CASE WHEN p.v_string IS NULL THEN 0 ELSE 1 END AS has_v"
+        "   FROM peers p"
+        "   LEFT JOIN src ON src.ip=p.ip AND src.port=p.port"
+        "   LEFT JOIN dst ON dst.ip=p.ip AND dst.port=p.port"
+        "   LEFT JOIN ipc ON ipc.ip=p.ip"
+        "  WHERE p.last_seen >= ?"
+        "  ORDER BY p.last_seen DESC"
+        "  LIMIT ?";
+    if (sqlite3_prepare_v2(g_db, SQL, -1, &s, NULL) != SQLITE_OK) return 0;
+    sqlite3_bind_int64(s, 1, since_ts);
+    sqlite3_bind_int  (s, 2, max);
+
+    int n = 0;
+    while (sqlite3_step(s) == SQLITE_ROW && n < max) {
+        struct db_peer_signal_row *r = &out[n];
+        const char *ip = (const char *)sqlite3_column_text(s, 0);
+        if (!ip) continue;
+        snprintf(r->ip, sizeof(r->ip), "%s", ip);
+        r->port         = sqlite3_column_int  (s, 1);
+        r->as_src       = sqlite3_column_int64(s, 2);
+        r->as_dst       = sqlite3_column_int64(s, 3);
+        r->same_ip      = sqlite3_column_int64(s, 4);
+        r->queries_in   = sqlite3_column_int64(s, 5);
+        r->queries_out  = sqlite3_column_int64(s, 6);
+        r->ro           = sqlite3_column_type(s, 7) == SQLITE_NULL
+                              ? -1 : sqlite3_column_int(s, 7);
+        r->bep42_ok     = sqlite3_column_type(s, 8) == SQLITE_NULL
+                              ? -1 : sqlite3_column_int(s, 8);
+        r->has_v_string = sqlite3_column_int(s, 9);
+        n++;
+    }
+    sqlite3_finalize(s);
+    return n;
+}
+
 /* Fill `out` with up to `max` (ip,port) entries whose last_pinged is NULL or
  * older than `older_than_ts`, oldest first. Returns the number filled. */
 int
@@ -1626,6 +1683,27 @@ db_select_stats_json(void)
      * deleted). 0 if the db is fresh and no peer has been observed yet. */
     json_object_set_new(o, "db_first_seen",
         json_integer(scalar_i64("SELECT COALESCE(MIN(first_seen), 0) FROM peers")));
+
+    /* Deny pipeline visibility:
+     *   deny_set_size — entries currently held (after TTL eviction).
+     *   denied_pkts.{reputation,rate_limit,classifier} — cumulative
+     *     count of inbound packets we've log-and-dropped since boot. */
+    int total = 0; int by_reason[3] = {0, 0, 0};
+    deny_stats(&total, by_reason);
+    json_object_set_new(o, "deny_set_size", json_integer(total));
+    uint64_t pkts[3] = {0, 0, 0};
+    dht_wrap_get_deny_stats(pkts);
+    json_t *dp = json_object();
+    json_object_set_new(dp, "reputation",  json_integer((json_int_t)pkts[0]));
+    json_object_set_new(dp, "rate_limit",  json_integer((json_int_t)pkts[1]));
+    json_object_set_new(dp, "classifier",  json_integer((json_int_t)pkts[2]));
+    json_object_set_new(o, "denied_pkts", dp);
+    json_t *db = json_object();
+    json_object_set_new(db, "reputation",  json_integer(by_reason[0]));
+    json_object_set_new(db, "rate_limit",  json_integer(by_reason[1]));
+    json_object_set_new(db, "classifier",  json_integer(by_reason[2]));
+    json_object_set_new(o, "deny_breakdown", db);
+
     char *js = json_dumps(o, JSON_COMPACT);
     json_decref(o);
     return js;

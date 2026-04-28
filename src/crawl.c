@@ -12,6 +12,7 @@
 #include "bencode.h"
 #include "bep44.h"
 #include "db.h"
+#include "deny.h"
 #include "dht_wrap.h"
 #include "observe.h"
 
@@ -213,6 +214,10 @@ sl_insert(struct worker *w, const struct sockaddr *peer, socklen_t peerlen,
 {
     if (peer->sa_family != w->family) return -1;
     if (peerlen > (socklen_t)sizeof(struct sockaddr_storage)) return -1;
+    /* Skip denied peers regardless of seed source. Catches both
+     * worker_reseed (DB-pulled or jech-pulled candidates) and find_node
+     * reply parsing (ingest_compact_nodes / _nodes6). */
+    if (deny_check(peer, peerlen)) return -1;
 
     for (int i = 0; i < w->sl_count; i++) {
         if (sa_eq_generic((const struct sockaddr *)&w->sl[i].peer, peer)) {

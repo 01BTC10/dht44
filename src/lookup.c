@@ -23,6 +23,7 @@
 
 #include "bencode.h"
 #include "bep44.h"
+#include "deny.h"
 #include "dht_wrap.h"
 #include "observe.h"
 
@@ -138,6 +139,8 @@ shortlist_insert(lookup_run *L, const uint8_t *id_or_null,
                  const struct sockaddr *peer, socklen_t peerlen)
 {
     if (peerlen > (socklen_t)sizeof(struct sockaddr_storage)) return -1;
+    /* Skip denied peers — same chokepoint as crawl.c sl_insert. */
+    if (deny_check(peer, peerlen)) return -1;
     /* dedupe by addr */
     for (int i = 0; i < L->shortlist_count; i++) {
         if (sa_eq((const struct sockaddr *)&L->shortlist[i].peer, peer)) {

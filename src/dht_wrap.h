@@ -25,6 +25,11 @@ typedef struct {
 
 int dht_wrap_peek_top(const uint8_t *buf, size_t len, dht_wrap_peek *out);
 
+/* Cumulative count of inbound packets dropped by the deny pipeline.
+ * Indices: 0=reputation, 1=rate_limit, 2=classifier. Surfaced via
+ * /api/stats. */
+void dht_wrap_get_deny_stats(uint64_t out_by_reason[3]);
+
 /* ================================================================
  * Wrap lifecycle
  * ================================================================ */

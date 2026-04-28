@@ -26,9 +26,15 @@
 #include <openssl/evp.h>
 #include <sodium.h>
 
+#include <arpa/inet.h>
+#include <stdint.h>
+#include <time.h>
+
 #include "bencode.h"
+#include "deny.h"
 #include "dht.h"
 #include "observe.h"
+#include "reputation.h"
 #include "state.h"
 
 /* ============================================================
@@ -709,6 +715,96 @@ periodic_cb(void *closure, int event,
     (void)closure; (void)event; (void)info_hash; (void)data; (void)data_len;
 }
 
+/* ============================================================
+ * Per-IP packet rate limiter (inline, fixed-size table).
+ *
+ * Sustained-rate detector. Each slot tracks the previous + current
+ * 1-second bucket counts; if the trailing 2-second sum exceeds
+ * RATE_THRESHOLD the peer is added to the deny set with a 10-minute
+ * TTL.
+ *
+ * Bounded memory; evicts via direct overwrite when the hash slot is
+ * occupied by a different (ip, port) — slightly racy but safe (worst
+ * case: one extra slot scan to re-deny on next flood).
+ * ============================================================ */
+#define RATE_SLOTS         1024
+#define RATE_THRESHOLD     20      /* >10 pkt/s sustained over 2s */
+
+struct rate_slot {
+    char     ip[INET6_ADDRSTRLEN];
+    uint16_t port;
+    uint16_t bucket_now_ct;
+    uint16_t bucket_prev_ct;
+    int64_t  bucket_now_sec;       /* unix second of the current bucket */
+};
+
+static struct rate_slot g_rate[RATE_SLOTS];
+
+/* Drop counters for /api/stats. Indices: 0=reputation, 1=rate, 2=classifier. */
+static uint64_t g_denied_pkts[3] = {0, 0, 0};
+
+/* Returns 1 if the rate-limiter just decided to deny this peer (and
+ * registered it with the deny set), 0 otherwise. */
+static int
+rate_check_and_maybe_deny(const struct sockaddr *from, int fromlen)
+{
+    if (!from) return 0;
+    char ip[INET6_ADDRSTRLEN]; uint16_t port = 0;
+    if (from->sa_family == AF_INET) {
+        const struct sockaddr_in *sa = (const struct sockaddr_in *)from;
+        if (!inet_ntop(AF_INET, &sa->sin_addr, ip, sizeof(ip))) return 0;
+        port = ntohs(sa->sin_port);
+    } else if (from->sa_family == AF_INET6) {
+        const struct sockaddr_in6 *sa = (const struct sockaddr_in6 *)from;
+        if (!inet_ntop(AF_INET6, &sa->sin6_addr, ip, sizeof(ip))) return 0;
+        port = ntohs(sa->sin6_port);
+    } else return 0;
+
+    /* Slot index from FNV-1a-ish hash of ip + port. */
+    uint32_t h = 2166136261u;
+    for (const char *p = ip; *p; p++) { h ^= (uint8_t)*p; h *= 16777619u; }
+    h ^= (uint32_t)port * 16777619u;
+    struct rate_slot *r = &g_rate[h & (RATE_SLOTS - 1)];
+
+    int64_t now = (int64_t)time(NULL);
+    /* Re-key the slot if it's empty or holds a different peer. */
+    if (r->ip[0] == 0 || r->port != port || strcmp(r->ip, ip) != 0) {
+        snprintf(r->ip, sizeof(r->ip), "%s", ip);
+        r->port            = port;
+        r->bucket_now_sec  = now;
+        r->bucket_now_ct   = 1;
+        r->bucket_prev_ct  = 0;
+        return 0;
+    }
+    /* Same peer — advance the bucket if a second rolled over. */
+    if (now != r->bucket_now_sec) {
+        if (now == r->bucket_now_sec + 1) {
+            r->bucket_prev_ct = r->bucket_now_ct;
+        } else {
+            r->bucket_prev_ct = 0;
+        }
+        r->bucket_now_sec  = now;
+        r->bucket_now_ct   = 0;
+    }
+    if (r->bucket_now_ct < UINT16_MAX) r->bucket_now_ct++;
+
+    int total = r->bucket_now_ct + r->bucket_prev_ct;
+    if (total > RATE_THRESHOLD) {
+        deny_add(from, (socklen_t)fromlen, DENY_REASON_RATE_LIMIT, 600);
+        return 1;
+    }
+    return 0;
+}
+
+void
+dht_wrap_get_deny_stats(uint64_t out_by_reason[3])
+{
+    if (!out_by_reason) return;
+    out_by_reason[0] = g_denied_pkts[0];
+    out_by_reason[1] = g_denied_pkts[1];
+    out_by_reason[2] = g_denied_pkts[2];
+}
+
 int
 dht_wrap_step(const void *buf, size_t buflen,
               const struct sockaddr *from, int fromlen,
@@ -718,7 +814,9 @@ dht_wrap_step(const void *buf, size_t buflen,
 
     int forward = 1;
     if (buf && buflen > 0) {
-        /* Observe every inbound packet before dispatch. */
+        /* Observe every inbound packet before dispatch — the deny path
+         * below skips dispatch but observe always records, so the
+         * dashboard still shows what bad actors are doing. */
         if (observe_enabled()
             && (fromlen == (int)sizeof(struct sockaddr_in)
                 || fromlen == (int)sizeof(struct sockaddr_in6))) {
@@ -728,6 +826,50 @@ dht_wrap_step(const void *buf, size_t buflen,
                                buf, buflen, &op);
             }
         }
+
+        /* Deny check: log + drop without dispatching to BEP 44 or jech.
+         * Three populating sources, all consulted here:
+         *   1. existing entry in the deny set (classifier or earlier
+         *      reputation/rate-limit add still within TTL)
+         *   2. iBlockList strong-match seen for the first time —
+         *      lazy-add into deny set so subsequent packets are O(1)
+         *   3. per-IP packet rate exceeded — adds to deny set with
+         *      10-min TTL, deny_check picks it up next packet
+         * Returning early here means: no maybe_handle_bep44 (no BEP 44
+         * response), no dht_periodic forwarding (no jech routing-table
+         * insertion). The peer effectively stops existing for us. */
+        const char *deny_reason = deny_check(from, (socklen_t)fromlen);
+        if (!deny_reason) {
+            const char *rs = NULL, *rl = NULL;
+            if (reputation_lookup(from, &rs, &rl)
+                && rs && rl
+                && reputation_label_is_strong(rs, rl)) {
+                deny_add(from, (socklen_t)fromlen,
+                         DENY_REASON_REPUTATION, 3600);
+                deny_reason = DENY_REASON_REPUTATION;
+            }
+        }
+        if (!deny_reason && rate_check_and_maybe_deny(from, fromlen)) {
+            deny_reason = DENY_REASON_RATE_LIMIT;
+        }
+        if (deny_reason) {
+            int idx = (deny_reason == DENY_REASON_REPUTATION) ? 0
+                    : (deny_reason == DENY_REASON_RATE_LIMIT) ? 1 : 2;
+            g_denied_pkts[idx]++;
+            /* Tick jech without forwarding so its internal timers
+             * still advance. Same path as the BEP 44 intercept. */
+            time_t tosleep_d = 1;
+            dht_periodic(NULL, 0, NULL, 0, &tosleep_d, periodic_cb, NULL);
+            pending_sweep();
+            long jech_ms_d  = (long)tosleep_d * 1000;
+            int  pend_ms_d  = pending_next_deadline_ms();
+            long combined_d = jech_ms_d < pend_ms_d ? jech_ms_d : pend_ms_d;
+            if (combined_d < 0) combined_d = 0;
+            if (combined_d > INT32_MAX) combined_d = INT32_MAX;
+            *next_wake_ms = (int)combined_d;
+            return 0;
+        }
+
         forward = !maybe_handle_bep44(buf, buflen, from, fromlen);
     }
 

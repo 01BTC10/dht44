@@ -144,6 +144,28 @@ int db_select_closest_alive(int family,
                             int *out_lens,
                             uint8_t (*out_ids)[BEP44_NODE_ID_LEN]);
 
+/* Row shape used by the deny refresh task. Keep packed; the refresh
+ * tick stack-allocates an array of these (max 1000) and walks them. */
+struct db_peer_signal_row {
+    char    ip[64];
+    int     port;
+    int64_t as_src;          /* derived from edges table */
+    int64_t as_dst;          /* derived from edges table */
+    int64_t same_ip;         /* number of distinct ports observed on this IP */
+    int64_t queries_in;
+    int64_t queries_out;
+    int     ro;              /* -1 = NULL */
+    int     bep42_ok;        /* -1 = NULL */
+    int     has_v_string;    /* 0|1 */
+};
+
+/* Pull up to `max` peers with last_seen >= since_ts, latest first,
+ * along with the edge-derived signals (as_src, as_dst, same_ip) the
+ * classifier needs. Caller provides a stack-allocated array. Returns
+ * count actually filled (<= max). */
+int db_select_peers_with_signals(int max, int64_t since_ts,
+                                 struct db_peer_signal_row *out);
+
 /* Liveness sweeper helpers. */
 int  db_select_liveness_candidates(int max, int64_t older_than_ts,
                                    struct sockaddr_storage *out, int *out_lens);
