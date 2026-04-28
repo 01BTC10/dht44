@@ -18,7 +18,7 @@
 
 import puppeteer from 'puppeteer';
 
-const URL    = process.env.OG_URL    || 'https://dht44.com/dashboard/graph';
+const URL    = process.env.OG_URL    || 'https://dht44.com/dashboard/peers';
 const OUT    = process.env.OG_OUT    || '/var/www/dht44.com/og.png';
 const WAITMS = parseInt(process.env.OG_WAIT_MS || '8000', 10);
 const WIDTH  = 1200;
