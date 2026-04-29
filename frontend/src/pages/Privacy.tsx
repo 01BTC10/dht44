@@ -16,7 +16,7 @@ export default function Privacy() {
         lede="Two distinct privacy stories live on this site: what we collect about you when you visit dht44.com, and what the crawler observes about peers on the public BitTorrent DHT. Both are documented below."
       >
         <p className="small">
-          Last updated: 2026-04-27. We will revise the date when content
+          Last updated: 2026-04-29. We will revise the date when content
           materially changes; non-material edits (typos, formatting) won't
           bump the date.
         </p>
@@ -128,10 +128,18 @@ export default function Privacy() {
 
         <h3>Data retention for the crawler</h3>
         <p>
-          Per the daemon's <code>--prune-days</code> default, peers that
-          have not been observed in 7 days are deleted from the operator's
-          internal database. The public API serves the same window. There
-          is no archival; deleted data is not recovered.
+          Per the daemon's <code>--prune-days</code> setting (currently
+          3 days on this deployment), peers that have not been observed
+          in 3 days are deleted from the operator's internal database.
+          The public API serves the same window. There is no archival;
+          deleted data is not recovered.
+        </p>
+        <p className="small">
+          The default in the source code is 7 days; this deployment
+          tightened it to 3 days because operationally we only need
+          1-24 hours of peer history (routing-table seed, classifier
+          signals, graph view) and a shorter window means less data
+          retained per peer who happens to query us.
         </p>
 
         <h3>Lawful basis (GDPR Art. 6)</h3>

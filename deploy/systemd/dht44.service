@@ -19,10 +19,17 @@ WorkingDirectory=/home/r2d2/dht44-crawler
 # --geoip-*: MaxMind GeoLite2 dbs at $DHT44_HOME/geoip/. Without these,
 #   country/ASN attribution and the iblocklist datacenter-keyword path
 #   degrade silently.
+# --prune-days 3: aggressive retention — peers not seen in 3 days are
+#   deleted from observe.db. The classifier and routing-table seed only
+#   need ~1-24 h of history; 3 days gives margin for slow-cadence
+#   patterns (a peer that goes dark over a weekend still gets
+#   recognized when it returns) without keeping data we don't use.
+#   Privacy claim in /privacy must match — keep these in sync.
 ExecStart=/home/r2d2/dht44-crawler/dht44 daemon \
     --port 6890 \
     --no-upnp \
     --crawl --crawl-workers 8 --crawl-pps 100 \
+    --prune-days 3 \
     --web 8877 \
     --geoip-city /var/lib/dht44/geoip/city-lite.mmdb \
     --geoip-asn  /var/lib/dht44/geoip/asn-lite.mmdb
