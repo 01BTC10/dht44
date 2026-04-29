@@ -90,28 +90,35 @@ export default function BlogDhtSize() {
         </p>
 
         <h2>Live numbers</h2>
-        <p className="placeholder">
-          Once the crawler is running publicly at{" "}
+        <p className="small">
+          Snapshot from{" "}
           <Link to="/dashboard/peers">dht44.com/dashboard</Link>,
-          embed real numbers here. Until then, treat the figures
-          below as illustrative. Last updated: 2026-04-27.
+          April 2026. The dashboard widgets at the top of the peers
+          tab show these in real time. Last updated: 2026-04-29.
         </p>
         <ul>
           <li><strong>Recently-seen peers (alive in last 6h)</strong>:
-            <em>~28 000 (placeholder)</em>. This is the peer count the
-            dashboard's "alive 6h" badge shows.</li>
+            <em>~50 000</em>. This is the peer count the dashboard's
+            "alive 6h" badge shows. Daily rhythm makes it bounce
+            between 30K and 80K depending on UTC hour.</li>
           <li><strong>Recently-seen peers (alive in last 24h)</strong>:
-            <em>~70 000 (placeholder)</em>.</li>
-          <li><strong>Cumulative observed since 7-day window</strong>:
-            <em>~250 000 (placeholder)</em>. The "stale" bucket is the
-            difference between this and the 24h-alive count — they were
-            online when we saw them but aren't responding now.</li>
-          <li><strong>IPv4 / IPv6 split</strong>: <em>roughly 75% / 25%
-            (placeholder)</em>. Higher v6 share than the global Internet
-            average because BitTorrent clients have had dual-stack
-            support for over a decade.</li>
-          <li><strong>Active infohashes (unique, 7d)</strong>:
-            <em>~8–10 million (placeholder)</em>.</li>
+            <em>~155 000</em>.</li>
+          <li><strong>Cumulative observed in our 3-day window</strong>:
+            <em>~200 000</em>. Beyond 3 days the daemon prunes — we
+            don't keep an archival record. The "stale" bucket on the
+            dashboard is the difference between cumulative and the
+            24h-alive count: peers that were online when we saw them
+            but aren't responding now.</li>
+          <li><strong>IPv4 / IPv6 split</strong>: <em>roughly 66% / 34%</em>.
+            Higher v6 share than the global Internet average because
+            BitTorrent clients have had dual-stack support for over a
+            decade.</li>
+          <li><strong>Distinct infohashes observed (3d)</strong>:
+            <em>~400 000</em> at this single vantage point. Published
+            academic measurements suggest the active <em>global</em>
+            set per week runs into the millions — most swarms simply
+            never query our specific node, so they don't show up in
+            our BEP 51 samples.</li>
         </ul>
 
         <h2>Why the numbers in the news are usually inflated</h2>
@@ -143,9 +150,10 @@ export default function BlogDhtSize() {
         </p>
 
         <h2>What we observed about the population structure</h2>
-        <p className="placeholder">
-          Specific numbers below are placeholders to be replaced
-          with crawler output once the public dashboard is live.
+        <p className="small">
+          Numbers below summarize what dht44.com has observed in
+          April 2026; the full breakdowns are visible on{" "}
+          <Link to="/dashboard/peers">the peers tab</Link>.
         </p>
 
         <h3>Top ASNs</h3>
