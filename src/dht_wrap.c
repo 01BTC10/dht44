@@ -797,6 +797,45 @@ rate_check_and_maybe_deny(const struct sockaddr *from, int fromlen)
     return 0;
 }
 
+/* Bogon detector — endpoints that violate the public-DHT spec
+ * outright. We filter these in three places: the inbound packet
+ * receive path (drop without dispatch), find_node/get_peers reply
+ * parsing in crawl.c (don't insert into shortlist or emit edge), and
+ * by extension anywhere outbound that would try to send to one. */
+int
+dht_wrap_is_bogon(const struct sockaddr *peer)
+{
+    if (!peer) return 1;
+    if (peer->sa_family == AF_INET) {
+        const struct sockaddr_in *s4 = (const struct sockaddr_in *)peer;
+        if (s4->sin_port == 0) return 1;
+        uint32_t a  = ntohl(s4->sin_addr.s_addr);
+        uint8_t  b1 = (a >> 24) & 0xff;
+        uint8_t  b2 = (a >> 16) & 0xff;
+        if (b1 == 0)         return 1;       /* 0.0.0.0/8 */
+        if (b1 == 10)        return 1;       /* 10.0.0.0/8 */
+        if (b1 == 127)       return 1;       /* 127.0.0.0/8 loopback */
+        if (b1 == 169 && b2 == 254) return 1;/* 169.254/16 link-local */
+        if (b1 == 172 && b2 >= 16 && b2 <= 31) return 1; /* 172.16/12 */
+        if (b1 == 192 && b2 == 168) return 1;/* 192.168/16 */
+        if (b1 >= 224)       return 1;       /* multicast + reserved */
+        return 0;
+    }
+    if (peer->sa_family == AF_INET6) {
+        const struct sockaddr_in6 *s6 = (const struct sockaddr_in6 *)peer;
+        if (s6->sin6_port == 0) return 1;
+        const uint8_t *p = s6->sin6_addr.s6_addr;
+        /* ::/128 unspecified */
+        int all_zero = 1;
+        for (int i = 0; i < 15; i++) if (p[i]) { all_zero = 0; break; }
+        if (all_zero && (p[15] == 0 || p[15] == 1)) return 1;
+        if (p[0] == 0xfe && (p[1] & 0xc0) == 0x80) return 1; /* fe80::/10 */
+        if (p[0] == 0xff) return 1;                          /* ff00::/8 */
+        return 0;
+    }
+    return 1;
+}
+
 void
 dht_wrap_get_deny_stats(uint64_t out_by_reason[3])
 {
@@ -838,6 +877,23 @@ dht_wrap_step(const void *buf, size_t buflen,
 
     int forward = 1;
     if (buf && buflen > 0) {
+        /* Bogon source: a packet from 0.0.0.0:0 or a similar
+         * protocol-violating endpoint can't have a real client behind
+         * it. Drop BEFORE observe so we don't pollute peers/queries
+         * with junk; tick jech with NULL so its timers still advance. */
+        if (from && dht_wrap_is_bogon(from)) {
+            time_t tosleep_b = 1;
+            dht_periodic(NULL, 0, NULL, 0, &tosleep_b, periodic_cb, NULL);
+            pending_sweep();
+            long jech_ms_b  = (long)tosleep_b * 1000;
+            int  pend_ms_b  = pending_next_deadline_ms();
+            long combined_b = jech_ms_b < pend_ms_b ? jech_ms_b : pend_ms_b;
+            if (combined_b < 0) combined_b = 0;
+            if (combined_b > INT32_MAX) combined_b = INT32_MAX;
+            *next_wake_ms = (int)combined_b;
+            return 0;
+        }
+
         /* Observe every inbound packet before dispatch — the deny path
          * below skips dispatch but observe always records, so the
          * dashboard still shows what bad actors are doing. */

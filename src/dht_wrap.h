@@ -34,6 +34,14 @@ void dht_wrap_get_deny_stats(uint64_t out_by_reason[3]);
 void dht_wrap_load_deny_stats(void);
 void dht_wrap_save_deny_stats(void);
 
+/* Returns 1 if `peer` is a bogon endpoint that should never appear in
+ * a public DHT — unspecified address, loopback, link-local, multicast,
+ * RFC1918, or port 0. Other clients sometimes propagate "0.0.0.0:0"
+ * and similar junk in find_node replies (placeholder, parse glitch,
+ * or Sybil-padding); filtering them at the observe + insert paths
+ * keeps the peers/edges tables clean. */
+int dht_wrap_is_bogon(const struct sockaddr *peer);
+
 /* ================================================================
  * Wrap lifecycle
  * ================================================================ */

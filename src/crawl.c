@@ -214,6 +214,7 @@ sl_insert(struct worker *w, const struct sockaddr *peer, socklen_t peerlen,
 {
     if (peer->sa_family != w->family) return -1;
     if (peerlen > (socklen_t)sizeof(struct sockaddr_storage)) return -1;
+    if (dht_wrap_is_bogon(peer)) return -1;
     /* Skip denied peers regardless of seed source. Catches both
      * worker_reseed (DB-pulled or jech-pulled candidates) and find_node
      * reply parsing (ingest_compact_nodes / _nodes6). */
@@ -493,6 +494,12 @@ ingest_compact_nodes(struct worker *w, const struct sockaddr *responder,
         sa.sin_family = AF_INET;
         memcpy(&sa.sin_addr.s_addr, b + i + 20, 4);
         memcpy(&sa.sin_port,        b + i + 24, 2);
+        /* Skip "0.0.0.0:0", loopback, RFC1918, multicast, port 0.
+         * Some clients use 0.0.0.0:0 as a placeholder before they've
+         * learned their public IP, and Sybil farms zero-pad short
+         * nodes blobs. Both end up in find_node replies; either way
+         * they're junk and shouldn't enter our peers/edges tables. */
+        if (dht_wrap_is_bogon((const struct sockaddr *)&sa)) continue;
         sl_insert(w, (const struct sockaddr *)&sa, sizeof(sa), b + i);
         if (responder) db_upsert_edge(responder, responderlen,
                                       (const struct sockaddr *)&sa, sizeof(sa));
@@ -512,6 +519,7 @@ ingest_compact_nodes6(struct worker *w, const struct sockaddr *responder,
         sa.sin6_family = AF_INET6;
         memcpy(&sa.sin6_addr, b + i + 20, 16);
         memcpy(&sa.sin6_port, b + i + 36,  2);
+        if (dht_wrap_is_bogon((const struct sockaddr *)&sa)) continue;
         sl_insert(w, (const struct sockaddr *)&sa, sizeof(sa), b + i);
         if (responder) db_upsert_edge(responder, responderlen,
                                       (const struct sockaddr *)&sa, sizeof(sa));

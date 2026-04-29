@@ -139,6 +139,7 @@ shortlist_insert(lookup_run *L, const uint8_t *id_or_null,
                  const struct sockaddr *peer, socklen_t peerlen)
 {
     if (peerlen > (socklen_t)sizeof(struct sockaddr_storage)) return -1;
+    if (dht_wrap_is_bogon(peer)) return -1;
     /* Skip denied peers — same chokepoint as crawl.c sl_insert. */
     if (deny_check(peer, peerlen)) return -1;
     /* dedupe by addr */
