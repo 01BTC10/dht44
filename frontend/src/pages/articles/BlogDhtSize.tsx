@@ -121,6 +121,59 @@ export default function BlogDhtSize() {
             our BEP 51 samples.</li>
         </ul>
 
+        <h2>How much of the network do we actually see?</h2>
+        <p>
+          Comparing our numbers against the published global estimates
+          gives a coverage ratio per dimension:
+        </p>
+        <ul>
+          <li><strong>Concurrent peers</strong>: ~50K observed vs.{" "}
+            ~10M global → <em>about 0.5%</em> of all peers online at
+            any moment.</li>
+          <li><strong>Daily uniques</strong>: ~155K vs. 3-5M →
+            <em> about 3-5%</em> of clients seen per day.</li>
+          <li><strong>3-day cumulative</strong>: ~200K vs. 10-15M
+            → <em>about 1-2%</em>.</li>
+          <li><strong>Distinct infohashes (3d)</strong>: ~400K vs.
+            millions per week → <em>about 5-10%</em>. BEP 51 sampling
+            is more efficient than peer discovery — one response carries
+            up to eight infohashes from a peer's storage.</li>
+        </ul>
+        <p>
+          The ratio isn't uniform across peer populations. The slice
+          we see well: peers online for &gt;6 hours, with stable IPs,
+          on persistent infrastructure (datacenters, fixed-IP residential).
+          They propagate through routing tables and we'll find them
+          within a few hours of a crawl walk passing through their
+          keyspace zone.
+        </p>
+        <p>
+          The slice we miss: short-lived sessions (a casual user
+          opening qBittorrent for an hour and closing it), peers behind
+          strict CGNAT (where the {"{"}IP, port{"}"} mapping changes
+          before propagation completes), and peers in keyspace zones
+          our rate-limited walks don't reach often.
+        </p>
+        <p>
+          That said, this is a single observatory. To approach
+          "complete" coverage you'd run 5-10 distributed vantage points
+          (Asia / Europe / North America / South America), each
+          contributing a slice biased toward its own routing-table
+          neighborhood, and merge the results. Academic projects like
+          the ETH Zurich and Cambridge measurement studies do exactly
+          that. Production "full-DHT" crawlers like BitMagnet operate
+          dozens of nodes simultaneously.
+        </p>
+        <p>
+          The honest framing: <strong>dht44 is a vantage, not a census.</strong>
+          {" "}It's a representative sample of the long-lived,
+          stable-infrastructure population — which is also the slice
+          that matters most for understanding network health,
+          surveillance presence, and protocol adoption. It is not, and
+          can't be, a complete enumeration of every BitTorrent client
+          on Earth.
+        </p>
+
         <h2>Why the numbers in the news are usually inflated</h2>
         <p>
           Press releases periodically claim "100 million users."
