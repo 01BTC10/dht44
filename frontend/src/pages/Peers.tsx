@@ -248,12 +248,27 @@ export default function Peers() {
           })}
         </span>
 
-        <label style={{ fontSize: 11, color: "#a0a8b0" }}>
-          <input type="checkbox" checked={bep51Only}
-                 onChange={e => setBep51Only(e.target.checked)}
-                 style={{ marginRight: 4 }} />
-          BEP 51 only ({bep51Count})
-        </label>
+        {/* Filter toggle: only peers we've confirmed respond to BEP 51
+          * sample_infohashes — i.e. peers that actively feed the
+          * infohash discovery pipeline. Styled to match the class
+          * filter chips above so it reads as "another filter you can
+          * turn on" rather than a quiet checkbox. */}
+        <button
+          onClick={() => setBep51Only(v => !v)}
+          title="Filter to peers that respond to BEP 51 sample_infohashes — the modern way DHT clients advertise the infohashes they're actively storing. Toggling this on shows only peers that contribute to our infohash discovery."
+          style={{
+            background: bep51Only ? "#1f2a36" : "#14181d",
+            color: bep51Only ? "#8fc0ff" : "#a0a8b0",
+            border: `1px solid ${bep51Only ? "#8fc0ff" : "#232a31"}`,
+            padding: "2px 8px", borderRadius: 2, cursor: "pointer",
+            font: "inherit", fontSize: 11, whiteSpace: "nowrap",
+          }}
+        >
+          infohash sources (BEP 51)
+          <span style={{ marginLeft: 6, color: "#556066" }}>
+            {bep51Count}
+          </span>
+        </button>
 
         <span className="small" style={{ marginLeft: "auto" }}>
           showing <b style={{ color: "#8fc0ff" }}>{visibleRows.length}</b>
