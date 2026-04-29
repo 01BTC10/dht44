@@ -176,6 +176,10 @@ db_open(const char *path)
         "  PRIMARY KEY(ip, source))",
         "CREATE INDEX IF NOT EXISTS peer_reputation_ip ON peer_reputation(ip)",
         "CREATE INDEX IF NOT EXISTS peer_reputation_q  ON peer_reputation(queried_at)",
+        /* kv: generic counter store for daemon-level stats that need
+         * to survive restarts (e.g. cumulative denied_pkts.*). */
+        "CREATE TABLE IF NOT EXISTS kv ("
+        "  key TEXT PRIMARY KEY, value INTEGER NOT NULL)",
         NULL,
     };
     for (int i = 0; MIGRATIONS[i]; i++) {
@@ -861,6 +865,38 @@ db_select_closest_alive(int family,
     }
     free(heap);
     return heap_n;
+}
+
+/* Generic key-value store. See db.h. */
+int64_t
+db_kv_get_i64(const char *key, int64_t def)
+{
+    if (!g_db || !key) return def;
+    sqlite3_stmt *s = NULL;
+    if (sqlite3_prepare_v2(g_db,
+            "SELECT value FROM kv WHERE key = ?", -1, &s, NULL) != SQLITE_OK)
+        return def;
+    sqlite3_bind_text(s, 1, key, -1, SQLITE_TRANSIENT);
+    int64_t out = def;
+    if (sqlite3_step(s) == SQLITE_ROW) out = sqlite3_column_int64(s, 0);
+    sqlite3_finalize(s);
+    return out;
+}
+
+void
+db_kv_set_i64(const char *key, int64_t value)
+{
+    if (!g_db || !key) return;
+    tx_begin_if_needed();
+    sqlite3_stmt *s = NULL;
+    if (sqlite3_prepare_v2(g_db,
+            "INSERT INTO kv(key, value) VALUES(?, ?)"
+            " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            -1, &s, NULL) != SQLITE_OK) return;
+    sqlite3_bind_text (s, 1, key, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(s, 2, value);
+    if (sqlite3_step(s) != SQLITE_DONE) log_err("kv set");
+    sqlite3_finalize(s);
 }
 
 /* Pull recently-active peers with their edge-derived signals for the

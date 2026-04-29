@@ -27,8 +27,12 @@ int dht_wrap_peek_top(const uint8_t *buf, size_t len, dht_wrap_peek *out);
 
 /* Cumulative count of inbound packets dropped by the deny pipeline.
  * Indices: 0=reputation, 1=rate_limit, 2=classifier. Surfaced via
- * /api/stats. */
+ * /api/stats. Persisted across daemon restarts via the kv store —
+ * call dht_wrap_load_deny_stats once after db_open at boot, then
+ * dht_wrap_save_deny_stats at 1 Hz alongside db_flush. */
 void dht_wrap_get_deny_stats(uint64_t out_by_reason[3]);
+void dht_wrap_load_deny_stats(void);
+void dht_wrap_save_deny_stats(void);
 
 /* ================================================================
  * Wrap lifecycle

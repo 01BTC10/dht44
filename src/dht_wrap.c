@@ -31,6 +31,7 @@
 #include <time.h>
 
 #include "bencode.h"
+#include "db.h"
 #include "deny.h"
 #include "dht.h"
 #include "observe.h"
@@ -803,6 +804,29 @@ dht_wrap_get_deny_stats(uint64_t out_by_reason[3])
     out_by_reason[0] = g_denied_pkts[0];
     out_by_reason[1] = g_denied_pkts[1];
     out_by_reason[2] = g_denied_pkts[2];
+}
+
+/* Read previously-saved cumulative drop counts out of the kv store.
+ * Called once after db_open at boot — turns the in-memory counter
+ * into a true running total across restarts, matching how queries /
+ * peers / infohashes naturally persist via the underlying tables. */
+void
+dht_wrap_load_deny_stats(void)
+{
+    g_denied_pkts[0] = (uint64_t)db_kv_get_i64("denied_pkts.reputation", 0);
+    g_denied_pkts[1] = (uint64_t)db_kv_get_i64("denied_pkts.rate_limit", 0);
+    g_denied_pkts[2] = (uint64_t)db_kv_get_i64("denied_pkts.classifier", 0);
+}
+
+/* Push current cumulative counts back to the kv store. Called from
+ * the daemon's 1 Hz tick alongside db_flush. The values are
+ * monotonically non-decreasing, so an UPSERT-overwrite is safe. */
+void
+dht_wrap_save_deny_stats(void)
+{
+    db_kv_set_i64("denied_pkts.reputation", (int64_t)g_denied_pkts[0]);
+    db_kv_set_i64("denied_pkts.rate_limit", (int64_t)g_denied_pkts[1]);
+    db_kv_set_i64("denied_pkts.classifier", (int64_t)g_denied_pkts[2]);
 }
 
 int

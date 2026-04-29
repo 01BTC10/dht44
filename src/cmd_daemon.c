@@ -1381,6 +1381,10 @@ cmd_daemon(int argc, char **argv)
          * from the dht_wrap inline reputation/rate-limit checks and
          * the 60s classifier-refresh tick below. */
         deny_init();
+        /* Restore cumulative deny counters so the dashboard's
+         * denied_pkts headline doesn't flip back to 0 every restart.
+         * Saved 1 Hz alongside db_flush below. */
+        dht_wrap_load_deny_stats();
     }
     if (g_args.crawl) {
         crawl_start(g_args.crawl_workers, g_args.crawl_pps);
@@ -1572,6 +1576,7 @@ cmd_daemon(int argc, char **argv)
             db_flush();
             http_ws_heartbeat();
             deny_tick(now);                    /* evict expired entries */
+            dht_wrap_save_deny_stats();        /* persist counters */
             next_flush = now + 1;
         }
         if (now >= next_deny_refresh) {

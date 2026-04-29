@@ -166,6 +166,13 @@ struct db_peer_signal_row {
 int db_select_peers_with_signals(int max, int64_t since_ts,
                                  struct db_peer_signal_row *out);
 
+/* Generic key-value store for daemon-level counters that need to
+ * survive restarts (e.g. cumulative denied_pkts). Keys are short
+ * strings; values are int64. Both helpers are no-ops if the db
+ * isn't open. db_kv_get_i64 returns `def` on miss. */
+int64_t db_kv_get_i64(const char *key, int64_t def);
+void    db_kv_set_i64(const char *key, int64_t value);
+
 /* Liveness sweeper helpers. */
 int  db_select_liveness_candidates(int max, int64_t older_than_ts,
                                    struct sockaddr_storage *out, int *out_lens);
