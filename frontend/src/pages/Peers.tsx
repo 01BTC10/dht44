@@ -190,7 +190,14 @@ export default function Peers() {
 
   return (
     <>
-      <div className="filter" style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 10 }}>
+      <div className="filter" style={{
+            display: "flex", flexWrap: "wrap", alignItems: "center", gap: 10,
+            /* Equal-width digits across every counter in the toolbar
+             * (page-size dropdown, BEP 51 count, "showing X of Y / Z").
+             * Without this, the "showing" span on the right shifts the
+             * pills leftward when its values change digit count. */
+            fontVariantNumeric: "tabular-nums",
+          }}>
         <input placeholder="filter by ip / country / client / tag / signal…"
                value={filter} onChange={e => setFilter(e.target.value)}
                style={{ flex: "1 1 260px" }} />
@@ -270,13 +277,31 @@ export default function Peers() {
           </span>
         </button>
 
-        <span className="small" style={{ marginLeft: "auto" }}>
-          showing <b style={{ color: "#8fc0ff" }}>{visibleRows.length}</b>
-          {" "}of {matchedCount.toLocaleString()} matched
-          {" / "}
-          <b style={{ color: "#8fc0ff" }}>
+        {/* The showing-of-totals span sits on the right via auto margin.
+          * inline-flex with min-width keeps the row stable when the
+          * page-size selector flips 50/100/250/etc. and the counters
+          * change digit count. text-align right + min-widths inside
+          * each counter span so digits grow leftward into reserved
+          * space rather than pushing the row layout. */}
+        <span className="small"
+              style={{ marginLeft: "auto", display: "inline-flex",
+                       alignItems: "baseline", whiteSpace: "nowrap" }}>
+          showing&nbsp;
+          <b style={{ color: "#8fc0ff", display: "inline-block",
+                      minWidth: "3.5ch", textAlign: "right" }}>
+            {visibleRows.length}
+          </b>
+          &nbsp;of&nbsp;
+          <span style={{ display: "inline-block",
+                         minWidth: "5.5ch", textAlign: "right" }}>
+            {matchedCount.toLocaleString()}
+          </span>
+          &nbsp;matched / <b style={{ color: "#8fc0ff",
+                                     display: "inline-block",
+                                     minWidth: "6.5ch",
+                                     textAlign: "right" }}>
             {total != null ? total.toLocaleString() : rows.length}
-          </b> unique peers
+          </b>&nbsp;unique peers
         </span>
 
         {!anyGeo && total != null && (
