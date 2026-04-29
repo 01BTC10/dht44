@@ -169,20 +169,21 @@ export default function Privacy() {
 
         <h2>3. Hosting and jurisdiction</h2>
         <ul>
-          <li>The website is served from a VPS in (operator-disclosed
-            location) behind Cloudflare. Cloudflare's edge cache may store
-            a static copy of any non-personalized response.</li>
-          <li>The crawler database lives on the same operator's residential
-            ISP connection in (jurisdiction). It does not leave that machine.</li>
+          <li>The website is served from a Hetzner VPS in
+            <strong> Singapore</strong>, behind Cloudflare.
+            Cloudflare's edge cache may store a static copy of any
+            non-personalized response.</li>
+          <li>The crawler database lives on the same Singapore VPS;
+            no replication, no off-host backups. The data does not
+            leave that machine.</li>
           <li>
-            The operator is in (jurisdiction) and is the data controller for
-            the purposes of GDPR.
+            The operator is the data controller for the purposes of
+            GDPR. Contact{" "}
+            <a href="mailto:tayaoutlk@gmail.com">tayaoutlk@gmail.com</a>
+            {" "}for GDPR / CCPA / data-removal requests; we respond
+            within 30 days.
           </li>
         </ul>
-        <p className="small">
-          (The locations above are placeholders pending the actual VPS
-          provisioning. Replace with concrete jurisdictions before launch.)
-        </p>
 
         <h2>4. Source code</h2>
         <p>
