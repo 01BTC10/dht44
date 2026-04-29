@@ -162,7 +162,9 @@ export default function DashboardShell() {
           <div><b>queries</b>{stats.queries.toLocaleString()}</div>
           <div><b>infohashes</b>{stats.infohashes.toLocaleString()}</div>
           <div><b>bep44</b>{stats.bep44_items.toLocaleString()}</div>
-          <div><b>rate</b>{stats.queries_per_min}/min</div>
+          <div style={{ minWidth: 110 }}>
+            <b>rate</b>{stats.queries_per_min}/min
+          </div>
           {stats.deny_set_size != null && (
             <div title={
               "log-and-drop deny pipeline. set: "
@@ -178,10 +180,14 @@ export default function DashboardShell() {
                     + `cls:${stats.denied_pkts.classifier}`
                   : "?")
             }
-                 style={{ color: "#ff9bb5" }}>
+                 style={{ color: "#ff9bb5", minWidth: 170 }}>
               <b>denied</b>{stats.deny_set_size.toLocaleString()}
               {dropsPerMin != null && (
-                <span className="small" style={{ marginLeft: 6 }}>
+                /* inline-block + min-width so jumping from "(87/min)"
+                 * to "(123/min)" doesn't push the rest of the pill row. */
+                <span className="small"
+                      style={{ marginLeft: 6, display: "inline-block",
+                               minWidth: 70, textAlign: "left" }}>
                   ({Math.round(dropsPerMin).toLocaleString()}/min)
                 </span>
               )}
