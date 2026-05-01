@@ -954,6 +954,59 @@ db_select_peers_with_signals(int max, int64_t since_ts,
     return n;
 }
 
+/* Streaming peer-with-signals walker. Same SQL shape as
+ * db_select_peers_with_signals but without LIMIT, fed one row at a
+ * time to `cb`. Used by aggregate endpoints (e.g. /api/class-stats).
+ * Pass since_ts=0 to walk every peer. */
+int64_t
+db_foreach_peer_signal(int64_t since_ts, db_peer_signal_cb cb, void *ctx)
+{
+    if (!g_db || !cb) return 0;
+    sqlite3_stmt *s = NULL;
+    static const char *SQL =
+        "WITH src AS (SELECT src_ip ip, src_port port, COUNT(*) c FROM edges GROUP BY 1,2),"
+        "     dst AS (SELECT dst_ip ip, dst_port port, COUNT(*) c FROM edges GROUP BY 1,2),"
+        "     ipc AS (SELECT ip, COUNT(*) c FROM peers GROUP BY 1)"
+        " SELECT p.ip, p.port,"
+        "        COALESCE(src.c,0) AS as_src,"
+        "        COALESCE(dst.c,0) AS as_dst,"
+        "        COALESCE(ipc.c,0) AS same_ip,"
+        "        p.queries_in, p.queries_out,"
+        "        p.ro, p.bep42_ok,"
+        "        CASE WHEN p.v_string IS NULL THEN 0 ELSE 1 END AS has_v"
+        "   FROM peers p"
+        "   LEFT JOIN src ON src.ip=p.ip AND src.port=p.port"
+        "   LEFT JOIN dst ON dst.ip=p.ip AND dst.port=p.port"
+        "   LEFT JOIN ipc ON ipc.ip=p.ip"
+        "  WHERE p.last_seen >= ?"
+        "  ORDER BY p.last_seen DESC";
+    if (sqlite3_prepare_v2(g_db, SQL, -1, &s, NULL) != SQLITE_OK) return 0;
+    sqlite3_bind_int64(s, 1, since_ts);
+
+    int64_t n = 0;
+    while (sqlite3_step(s) == SQLITE_ROW) {
+        struct db_peer_signal_row r = {0};
+        const char *ip = (const char *)sqlite3_column_text(s, 0);
+        if (!ip) continue;
+        snprintf(r.ip, sizeof(r.ip), "%s", ip);
+        r.port         = sqlite3_column_int  (s, 1);
+        r.as_src       = sqlite3_column_int64(s, 2);
+        r.as_dst       = sqlite3_column_int64(s, 3);
+        r.same_ip      = sqlite3_column_int64(s, 4);
+        r.queries_in   = sqlite3_column_int64(s, 5);
+        r.queries_out  = sqlite3_column_int64(s, 6);
+        r.ro           = sqlite3_column_type(s, 7) == SQLITE_NULL
+                             ? -1 : sqlite3_column_int(s, 7);
+        r.bep42_ok     = sqlite3_column_type(s, 8) == SQLITE_NULL
+                             ? -1 : sqlite3_column_int(s, 8);
+        r.has_v_string = sqlite3_column_int(s, 9);
+        n++;
+        if (cb(&r, ctx) != 0) break;
+    }
+    sqlite3_finalize(s);
+    return n;
+}
+
 /* Fill `out` with up to `max` (ip,port) entries whose last_pinged is NULL or
  * older than `older_than_ts`, oldest first. Returns the number filled. */
 int

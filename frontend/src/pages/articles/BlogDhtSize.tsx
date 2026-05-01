@@ -109,18 +109,19 @@ export default function BlogDhtSize() {
             depending on UTC hour.</li>
           <li><strong>Recently-seen peers (last 24h)</strong>:
             <em>~125 000</em>.</li>
-          <li><strong>Cumulative observed in our 7-day window</strong>:
-            <em>~295 000</em>. Beyond 7 days the daemon prunes
-            (default <code>--prune-days 7</code>) — we don't keep an
-            archival record. The "stale (&gt;24h)" bucket on the
-            dashboard is the difference between cumulative and the
+          <li><strong>Cumulative observed in our 3-day window</strong>:
+            <em>~295 000</em>. dht44 runs with{" "}
+            <code>--prune-days 3</code>: peers not seen in 3 days are
+            deleted from the DB, so we don't keep an archival record.
+            The "stale (&gt;24h)" bucket on the dashboard is the
+            difference between this cumulative count and the
             24h-seen count: peers that were online when we saw them
             but aren't responding now.</li>
           <li><strong>IPv4 / IPv6 split</strong>: <em>roughly 68% / 32%</em>.
             Higher v6 share than the global Internet average because
             BitTorrent clients have had dual-stack support for over a
             decade.</li>
-          <li><strong>Distinct infohashes observed (7d)</strong>:
+          <li><strong>Distinct infohashes observed (3d)</strong>:
             <em>~700 000</em> at this single vantage point. Published
             academic measurements suggest the active <em>global</em>
             set per week runs into the millions — most swarms simply
@@ -139,9 +140,9 @@ export default function BlogDhtSize() {
             any moment.</li>
           <li><strong>Daily uniques</strong>: ~125K vs. 3-5M →
             <em> about 2-4%</em> of clients seen per day.</li>
-          <li><strong>7-day cumulative</strong>: ~295K vs. 10-15M
+          <li><strong>3-day cumulative</strong>: ~295K vs. 10-15M
             → <em>about 2-3%</em>.</li>
-          <li><strong>Distinct infohashes (7d)</strong>: ~700K vs.
+          <li><strong>Distinct infohashes (3d)</strong>: ~700K vs.
             millions per week → <em>about 7-15%</em>. BEP 51 sampling
             is more efficient than peer discovery — one response carries
             up to eight infohashes from a peer's storage.</li>

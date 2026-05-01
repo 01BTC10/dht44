@@ -166,6 +166,17 @@ struct db_peer_signal_row {
 int db_select_peers_with_signals(int max, int64_t since_ts,
                                  struct db_peer_signal_row *out);
 
+/* Streaming variant: no LIMIT, no buffering. Walks every peer with
+ * last_seen >= since_ts (pass 0 for "all peers") in last_seen DESC
+ * order and invokes `cb` per row. Stops early if `cb` returns
+ * non-zero. Returns the number of rows visited. Used by aggregate
+ * endpoints (e.g. /api/class-stats) that don't want to materialize
+ * the entire peers table in memory. */
+typedef int (*db_peer_signal_cb)(const struct db_peer_signal_row *row,
+                                 void *ctx);
+int64_t db_foreach_peer_signal(int64_t since_ts,
+                               db_peer_signal_cb cb, void *ctx);
+
 /* Generic key-value store for daemon-level counters that need to
  * survive restarts (e.g. cumulative denied_pkts). Keys are short
  * strings; values are int64. Both helpers are no-ops if the db

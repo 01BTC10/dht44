@@ -257,6 +257,110 @@ country_stats_json(int limit)
 }
 
 /* ============================================================
+ * /api/class-stats — whole-DB classifier aggregate.
+ *
+ * Streams every peer row through classify_compute() and returns a
+ * count per class (ok / monitor / crawler / honeypot / seedbox).
+ *
+ * Includes the ASN-organization signal (cheap libmaxminddb lookup
+ * per row, in-memory, no I/O) but deliberately *skips* the per-peer
+ * reputation lookups that classify_peer() runs for /api/peers — those
+ * are SQLite + greynoise-cache hits per IP, ~1ms each, which would
+ * scale to minutes for a 300K-row peers table. The aggregate is the
+ * structural+ASN view; /api/peers remains the per-row source of
+ * truth that includes reputation.
+ *
+ * Cached for CLASS_STATS_TTL_S since the underlying SQL touches
+ * peers + edges + a same-ip CTE and can take a few seconds. The
+ * daemon is single-threaded (libwebsockets in the same select loop),
+ * so no mutex is needed around the cache.
+ * ============================================================ */
+
+#define CLASS_STATS_TTL_S 300
+
+struct class_acc {
+    int64_t counts[5];   /* ok=0, monitor=1, crawler=2, honeypot=3, seedbox=4 */
+    int64_t total;
+};
+
+static int
+class_stats_acc_cb(const struct db_peer_signal_row *r, void *ctx)
+{
+    struct class_acc *a = ctx;
+    struct peer_signals sig = {0};
+    sig.as_src       = r->as_src;
+    sig.as_dst       = r->as_dst;
+    sig.same_ip      = r->same_ip;
+    sig.queries_in   = r->queries_in;
+    sig.queries_out  = r->queries_out;
+    sig.ro           = r->ro;
+    sig.bep42_ok     = r->bep42_ok;
+    sig.has_v_string = r->has_v_string;
+
+    /* ASN-org enrichment. The geoip JSON is built and torn down per
+     * row; the dominant cost is the MMDB lookup, not the json_t. */
+    json_t *geo = geoip_lookup(r->ip);
+    if (geo) {
+        sig.asn_org = json_string_value(json_object_get(geo, "asn_org"));
+    }
+
+    struct classify_result res;
+    classify_compute(&sig, &res);
+
+    int idx = 0;
+    if (res.cls) {
+        if      (strcmp(res.cls, "monitor")  == 0) idx = 1;
+        else if (strcmp(res.cls, "crawler")  == 0) idx = 2;
+        else if (strcmp(res.cls, "honeypot") == 0) idx = 3;
+        else if (strcmp(res.cls, "seedbox")  == 0) idx = 4;
+    }
+    a->counts[idx]++;
+    a->total++;
+
+    if (geo) json_decref(geo);
+    return 0;
+}
+
+static char *s_class_cache_json = NULL;
+static time_t s_class_cache_ts = 0;
+
+static char *
+class_stats_json(void)
+{
+    time_t now = time(NULL);
+    if (s_class_cache_json && (now - s_class_cache_ts) < CLASS_STATS_TTL_S) {
+        return strdup(s_class_cache_json);
+    }
+
+    struct class_acc a = {0};
+    int64_t scanned = db_foreach_peer_signal(0, class_stats_acc_cb, &a);
+
+    json_t *o = json_object();
+    json_object_set_new(o, "ok",        json_integer(a.counts[0]));
+    json_object_set_new(o, "monitor",   json_integer(a.counts[1]));
+    json_object_set_new(o, "crawler",   json_integer(a.counts[2]));
+    json_object_set_new(o, "honeypot",  json_integer(a.counts[3]));
+    json_object_set_new(o, "seedbox",   json_integer(a.counts[4]));
+    json_object_set_new(o, "total",     json_integer(a.total));
+    json_object_set_new(o, "scanned",   json_integer(scanned));
+    json_object_set_new(o, "computed_at", json_integer((int64_t)now));
+    json_object_set_new(o, "ttl_s",     json_integer(CLASS_STATS_TTL_S));
+    json_object_set_new(o, "note",
+        json_string("Whole-DB structural classifier with ASN-org "
+                    "enrichment; per-peer reputation lookups (greynoise, "
+                    "iblocklist) skipped here -- those are applied at "
+                    "/api/peers read-time only."));
+    char *fresh = json_dumps(o, JSON_COMPACT);
+    json_decref(o);
+    if (!fresh) return NULL;
+
+    free(s_class_cache_json);
+    s_class_cache_json = strdup(fresh);
+    s_class_cache_ts = now;
+    return fresh;
+}
+
+/* ============================================================
  * Crawler / monitor / honeypot classifier — JSON adaptor.
  *
  * The scoring core lives in classifier.c (struct peer_signals →
@@ -913,6 +1017,12 @@ dispatch_http(struct lws *wsi)
     }
     if (strcmp(uri, "/api/country-stats") == 0) {
         char *body = country_stats_json(limit);
+        int rc = send_json_response(wsi, body ? body : "{}");
+        free(body);
+        return rc;
+    }
+    if (strcmp(uri, "/api/class-stats") == 0) {
+        char *body = class_stats_json();
         int rc = send_json_response(wsi, body ? body : "{}");
         free(body);
         return rc;

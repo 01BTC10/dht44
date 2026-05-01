@@ -148,40 +148,51 @@ export default function BlogClassifyingPeers() {
 
         <h2>Per-class peer counts</h2>
         <p className="small">
-          From a 2 000-peer sample taken at dht44.com on 2026-05-01:
+          Whole-DB classifier sweep over all <strong>295 823</strong>{" "}
+          peers in dht44's 3-day retention window, taken at dht44.com
+          on 2026-05-01. Sourced from the <code>/api/class-stats</code>{" "}
+          endpoint, which streams every peer through{" "}
+          <code>classify_compute()</code> with the same scoring core
+          the dashboard uses, including the ASN-organization signal.
+          Per-peer reputation lookups (greynoise, iblocklist,
+          tor-exit) are excluded here — they're applied at{" "}
+          <code>/api/peers</code> read-time only — so a small number
+          of peers that the live dashboard tags as monitor or
+          honeypot via reputation will fall under <code>ok</code> in
+          this aggregate.
         </p>
         <ul>
-          <li><code>ok</code> — <strong>1 650 (82.5%)</strong>. The
+          <li><code>ok</code> — <strong>256 488 (86.7%)</strong>. The
             unremarkable majority: a real BT client, normal traffic
             shape, no operator-keyword hits.</li>
-          <li><code>monitor</code> — <strong>279 (13.9%)</strong>.
+          <li><code>monitor</code> — <strong>29 218 (9.9%)</strong>.
             Mostly datacenter peers with port-farm density and
             asymmetric inbound traffic. Some explicit anti-piracy
             operators (Trident Media Guard, MarkMonitor surface here).</li>
-          <li><code>crawler</code> — <strong>39 (1.9%)</strong>.
+          <li><code>crawler</code> — <strong>7 979 (2.7%)</strong>.
             Behavioural-shaped probers without enough signals to push
             into monitor; mostly research and indexing services.</li>
-          <li><code>honeypot</code> — <strong>21 (1.1%)</strong>.
-            Sybil-shape peers with high silent-taker scores plus
-            multiple supporting signals (port-farm, no v_string,
-            asymmetric inbound).</li>
-          <li><code>seedbox</code> — <strong>11 (0.6%)</strong>.
+          <li><code>seedbox</code> — <strong>1 461 (0.5%)</strong>.
             Datacenter peers with a real client identifier and clean
             traffic shape — labeled informationally rather than
             suspect.</li>
+          <li><code>honeypot</code> — <strong>677 (0.2%)</strong>.
+            Sybil-shape peers with high silent-taker scores plus
+            multiple supporting signals (port-farm, no v_string,
+            asymmetric inbound).</li>
         </ul>
         <p>
-          The breakdown is broadly consistent with the published
-          academic intuition (<code>ok</code> in the high-70s to
-          mid-80s, honeypots around 1%). The monitor share runs
-          higher than the single-digit baseline some older papers
-          report — likely because we sample from the recently-active
-          set, which over-represents the high-pps datacenter peers
-          that monitors run, while academic snapshots of the resting
-          routing table dilute them. Numbers fluctuate hour-to-hour
-          as observation churn changes which peers are in the
-          recently-active set; check the dashboard for the live
-          distribution.
+          The breakdown matches the published academic intuition
+          (<code>ok</code> in the high-70s to mid-80s, monitors in
+          single digits, honeypots well under 1%). Earlier
+          time-of-day snapshots from the recently-active subset
+          (the most-recent 2 000 peers) showed a higher monitor
+          share — that view over-represents high-pps datacenter
+          peers because monitors are <em>louder</em> per peer than
+          residential clients. The whole-DB number is the truer
+          population estimate. Numbers still drift hour-to-hour as
+          churn shifts which peers are in retention; check the
+          dashboard for the live distribution.
         </p>
 
         <h2>What this is not</h2>
