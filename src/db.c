@@ -1707,6 +1707,15 @@ db_select_stats_json(void)
     json_object_set_new(o, "peers_alive_24h", json_integer(alive_24h));
     json_object_set_new(o, "peers_stale",
         json_integer(db_count_peers() - alive_24h));
+    /* Routing-table populations from jech/dht. "good" = nodes that have
+     * proven responsive within ~15 min per BEP 5; "dubious" = known but
+     * unverified-recently. The dashboard's "connected (good)" tile is
+     * the closest thing to a live-link count. v6 deliberately omitted —
+     * deployment runs v4-only, so it would always be zero. */
+    int rt_good = 0, rt_dubious = 0;
+    dht_wrap_status(&rt_good, &rt_dubious);
+    json_object_set_new(o, "routing_good",  json_integer(rt_good));
+    json_object_set_new(o, "routing_total", json_integer(rt_good + rt_dubious));
     /* rates: rows in last 60s. SQLi safety: `now` is `time(NULL)` on
      * the server; never user-controlled. Formatted as %lld with
      * sufficient buffer. */

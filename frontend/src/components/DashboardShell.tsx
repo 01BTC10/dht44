@@ -18,6 +18,11 @@ type Stats = {
   peers_alive_6h?: number;
   peers_alive_24h?: number;
   peers_stale?: number;
+  /* jech/dht routing-table populations (IPv4). "good" = responsive
+   * within ~15 min; "total" = good + dubious. Optional so the
+   * dashboard still renders against an older daemon. */
+  routing_good?: number;
+  routing_total?: number;
   queries: number;
   infohashes: number;
   bep44_items: number;
@@ -132,8 +137,19 @@ export default function DashboardShell() {
       </header>
       {stats && (
         <div className="stats">
-          <div title="unique (ip, port) peers observed (cumulative since db opened)">
-            <b>peers</b>{stats.peers.toLocaleString()}
+          {stats.routing_good != null && (
+            <div title="BitTorrent DHT routing table — good IPv4 nodes (have responded within ~15 min per BEP 5). Total = good + dubious. This is the closest thing to a live-link count."
+                 style={{ color: "#7ce0ff" }}>
+              <b>connected (good)</b>{stats.routing_good.toLocaleString()}
+              {stats.routing_total != null && (
+                <span className="small" style={{ marginLeft: 6 }}>
+                  /{stats.routing_total.toLocaleString()}
+                </span>
+              )}
+            </div>
+          )}
+          <div title="Unique (ip, port) peers ever observed since the database was first opened (cumulative, all-time).">
+            <b>peers seen</b>{stats.peers.toLocaleString()}
             {(stats.peers_v4 != null || stats.peers_v6 != null) && (
               <span className="small" style={{ marginLeft: 6 }}>
                 (v4:{(stats.peers_v4 ?? 0).toLocaleString()}
@@ -142,38 +158,46 @@ export default function DashboardShell() {
             )}
           </div>
           {stats.peers_alive_6h != null && (
-            <div title="peers whose last_seen is within the last 6 hours"
+            <div title="Peers with last_seen in the last 6 hours. The liveness sweeper re-pings every observed peer on a rolling cadence so this count stays meaningful."
                  style={{ color: "#9be88a" }}>
-              <b>alive 6h</b>{stats.peers_alive_6h.toLocaleString()}
+              <b>seen 6h</b>{stats.peers_alive_6h.toLocaleString()}
             </div>
           )}
           {stats.peers_alive_24h != null && (
-            <div title="peers whose last_seen is within the last 24 hours"
+            <div title="Peers with last_seen in the last 24 hours."
                  style={{ color: "#cfd66c" }}>
-              <b>alive 24h</b>{stats.peers_alive_24h.toLocaleString()}
+              <b>seen 24h</b>{stats.peers_alive_24h.toLocaleString()}
             </div>
           )}
           {stats.peers_stale != null && (
-            <div title="peers not seen in over 24h (sweeper still re-pings until --prune-days)"
+            <div title="Peers not heard from in over 24 hours. The sweeper keeps re-pinging until --prune-days (default 7d), at which point they're deleted from the DB."
                  style={{ color: "#a0a8b0" }}>
-              <b>stale</b>{stats.peers_stale.toLocaleString()}
+              <b>stale (&gt;24h)</b>{stats.peers_stale.toLocaleString()}
             </div>
           )}
-          <div><b>queries</b>{stats.queries.toLocaleString()}</div>
-          <div><b>infohashes</b>{stats.infohashes.toLocaleString()}</div>
-          <div><b>bep44</b>{stats.bep44_items.toLocaleString()}</div>
-          <div style={{ minWidth: 110 }}>
-            <b>rate</b>{stats.queries_per_min}/min
+          <div title="All KRPC queries observed (cumulative since DB opened).">
+            <b>queries seen</b>{stats.queries.toLocaleString()}
+          </div>
+          <div title="Query rate over the trailing 60 seconds." style={{ minWidth: 110 }}>
+            <b>queries/min</b>{stats.queries_per_min.toLocaleString()}
+          </div>
+          <div title="Unique infohashes observed (cumulative since DB opened).">
+            <b>infohashes</b>{stats.infohashes.toLocaleString()}
+          </div>
+          <div title="BEP 44 mutable + immutable items observed (cumulative since DB opened).">
+            <b>bep44 items</b>{stats.bep44_items.toLocaleString()}
           </div>
           {stats.deny_set_size != null && (
             <div title={
-              "log-and-drop deny pipeline. set: "
+              "Active set (TTL ≤ 1h, currently denied): "
               + (stats.deny_breakdown
                   ? `rep:${stats.deny_breakdown.reputation} `
                     + `rate:${stats.deny_breakdown.rate_limit} `
                     + `cls:${stats.deny_breakdown.classifier}`
                   : "?")
-              + ". cumulative drops since boot: "
+              + "\nDrops/min (rolling 60s): "
+              + (dropsPerMin != null ? Math.round(dropsPerMin).toLocaleString() : "?")
+              + "\nCumulative drops (persisted across restarts, since DB opened): "
               + (stats.denied_pkts
                   ? `rep:${stats.denied_pkts.reputation} `
                     + `rate:${stats.denied_pkts.rate_limit} `
@@ -181,7 +205,7 @@ export default function DashboardShell() {
                   : "?")
             }
                  style={{ color: "#ff9bb5", minWidth: 170 }}>
-              <b>denied</b>{stats.deny_set_size.toLocaleString()}
+              <b>denied (active)</b>{stats.deny_set_size.toLocaleString()}
               {dropsPerMin != null && (
                 /* inline-block + min-width so jumping from "(87/min)"
                  * to "(123/min)" doesn't push the rest of the pill row. */
@@ -195,10 +219,10 @@ export default function DashboardShell() {
           )}
           {stats.db_first_seen != null && stats.db_first_seen > 0 && (
             <div
-              title={`since ${new Date(stats.db_first_seen * 1000).toLocaleString()}`}
+              title={`Time since the first peer was observed in this DB. Stable across daemon restarts; resets only if observe.db is deleted. First seen: ${new Date(stats.db_first_seen * 1000).toLocaleString()}`}
               style={{ color: "#a0a8b0" }}
             >
-              <b>uptime</b>{fmtUptime(stats.db_first_seen)}
+              <b>observing for</b>{fmtUptime(stats.db_first_seen)}
             </div>
           )}
         </div>
