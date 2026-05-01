@@ -93,28 +93,35 @@ export default function BlogDhtSize() {
         <p className="small">
           Snapshot from{" "}
           <Link to="/dashboard/peers">dht44.com/dashboard</Link>,
-          April 2026. The dashboard widgets at the top of the peers
-          tab show these in real time. Last updated: 2026-04-29.
+          late April–early May 2026. The dashboard tiles at the top
+          of every page show these in real time. Last updated:
+          2026-05-01.
         </p>
         <ul>
-          <li><strong>Recently-seen peers (alive in last 6h)</strong>:
-            <em>~50 000</em>. This is the peer count the dashboard's
-            "alive 6h" badge shows. Daily rhythm makes it bounce
-            between 30K and 80K depending on UTC hour.</li>
-          <li><strong>Recently-seen peers (alive in last 24h)</strong>:
-            <em>~155 000</em>.</li>
-          <li><strong>Cumulative observed in our 3-day window</strong>:
-            <em>~200 000</em>. Beyond 3 days the daemon prunes — we
-            don't keep an archival record. The "stale" bucket on the
+          <li><strong>Currently connected (good routing-table nodes)</strong>:
+            <em>~315</em>. These are the IPv4 nodes we've heard
+            from within the last ~15 minutes — the closest thing to
+            a live-link count. The figure tracks routing-table
+            health rather than total network size.</li>
+          <li><strong>Recently-seen peers (last 6h)</strong>:
+            <em>~65 000</em>. This is the dashboard's "seen 6h"
+            tile. Daily rhythm makes it bounce between 30K and 80K
+            depending on UTC hour.</li>
+          <li><strong>Recently-seen peers (last 24h)</strong>:
+            <em>~125 000</em>.</li>
+          <li><strong>Cumulative observed in our 7-day window</strong>:
+            <em>~295 000</em>. Beyond 7 days the daemon prunes
+            (default <code>--prune-days 7</code>) — we don't keep an
+            archival record. The "stale (&gt;24h)" bucket on the
             dashboard is the difference between cumulative and the
-            24h-alive count: peers that were online when we saw them
+            24h-seen count: peers that were online when we saw them
             but aren't responding now.</li>
-          <li><strong>IPv4 / IPv6 split</strong>: <em>roughly 66% / 34%</em>.
+          <li><strong>IPv4 / IPv6 split</strong>: <em>roughly 68% / 32%</em>.
             Higher v6 share than the global Internet average because
             BitTorrent clients have had dual-stack support for over a
             decade.</li>
-          <li><strong>Distinct infohashes observed (3d)</strong>:
-            <em>~400 000</em> at this single vantage point. Published
+          <li><strong>Distinct infohashes observed (7d)</strong>:
+            <em>~700 000</em> at this single vantage point. Published
             academic measurements suggest the active <em>global</em>
             set per week runs into the millions — most swarms simply
             never query our specific node, so they don't show up in
@@ -127,15 +134,15 @@ export default function BlogDhtSize() {
           gives a coverage ratio per dimension:
         </p>
         <ul>
-          <li><strong>Concurrent peers</strong>: ~50K observed vs.{" "}
-            ~10M global → <em>about 0.5%</em> of all peers online at
+          <li><strong>Concurrent peers</strong>: ~65K observed vs.{" "}
+            ~10M global → <em>about 0.5-1%</em> of all peers online at
             any moment.</li>
-          <li><strong>Daily uniques</strong>: ~155K vs. 3-5M →
-            <em> about 3-5%</em> of clients seen per day.</li>
-          <li><strong>3-day cumulative</strong>: ~200K vs. 10-15M
-            → <em>about 1-2%</em>.</li>
-          <li><strong>Distinct infohashes (3d)</strong>: ~400K vs.
-            millions per week → <em>about 5-10%</em>. BEP 51 sampling
+          <li><strong>Daily uniques</strong>: ~125K vs. 3-5M →
+            <em> about 2-4%</em> of clients seen per day.</li>
+          <li><strong>7-day cumulative</strong>: ~295K vs. 10-15M
+            → <em>about 2-3%</em>.</li>
+          <li><strong>Distinct infohashes (7d)</strong>: ~700K vs.
+            millions per week → <em>about 7-15%</em>. BEP 51 sampling
             is more efficient than peer discovery — one response carries
             up to eight infohashes from a peer's storage.</li>
         </ul>
@@ -205,8 +212,8 @@ export default function BlogDhtSize() {
         <h2>What we observed about the population structure</h2>
         <p className="small">
           Numbers below summarize what dht44.com has observed in
-          April 2026; the full breakdowns are visible on{" "}
-          <Link to="/dashboard/peers">the peers tab</Link>.
+          late April–early May 2026; the full breakdowns are
+          visible on <Link to="/dashboard/peers">the peers tab</Link>.
         </p>
 
         <h3>Top ASNs</h3>

@@ -148,32 +148,37 @@ export default function BlogClassifyingPeers() {
 
         <h2>Per-class peer counts</h2>
         <p className="small">
-          From a 2 000-peer sample taken at dht44.com on 2026-04-29:
+          From a 2 000-peer sample taken at dht44.com on 2026-05-01:
         </p>
         <ul>
-          <li><code>ok</code> — <strong>1 718 (86%)</strong>. The
+          <li><code>ok</code> — <strong>1 650 (82.5%)</strong>. The
             unremarkable majority: a real BT client, normal traffic
             shape, no operator-keyword hits.</li>
-          <li><code>monitor</code> — <strong>194 (9.7%)</strong>.
+          <li><code>monitor</code> — <strong>279 (13.9%)</strong>.
             Mostly datacenter peers with port-farm density and
             asymmetric inbound traffic. Some explicit anti-piracy
             operators (Trident Media Guard, MarkMonitor surface here).</li>
-          <li><code>crawler</code> — <strong>66 (3.3%)</strong>.
+          <li><code>crawler</code> — <strong>39 (1.9%)</strong>.
             Behavioural-shaped probers without enough signals to push
             into monitor; mostly research and indexing services.</li>
-          <li><code>honeypot</code> — <strong>18 (0.9%)</strong>.
+          <li><code>honeypot</code> — <strong>21 (1.1%)</strong>.
             Sybil-shape peers with high silent-taker scores plus
             multiple supporting signals (port-farm, no v_string,
             asymmetric inbound).</li>
-          <li><code>seedbox</code> — <strong>4 (0.2%)</strong>.
+          <li><code>seedbox</code> — <strong>11 (0.6%)</strong>.
             Datacenter peers with a real client identifier and clean
             traffic shape — labeled informationally rather than
             suspect.</li>
         </ul>
         <p>
-          The breakdown matches the published academic intuition
-          (<code>ok</code> 75-85%, monitors single-digit percent,
-          honeypots well under 1%). Numbers fluctuate hour-to-hour
+          The breakdown is broadly consistent with the published
+          academic intuition (<code>ok</code> in the high-70s to
+          mid-80s, honeypots around 1%). The monitor share runs
+          higher than the single-digit baseline some older papers
+          report — likely because we sample from the recently-active
+          set, which over-represents the high-pps datacenter peers
+          that monitors run, while academic snapshots of the resting
+          routing table dilute them. Numbers fluctuate hour-to-hour
           as observation churn changes which peers are in the
           recently-active set; check the dashboard for the live
           distribution.
